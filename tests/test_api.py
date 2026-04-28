@@ -3,10 +3,13 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 
 from backend.app.main import app
 from backend.app.routers import projects
 from backend.app.services import analyzer
+from backend.app.services.chapter_service import TextChapter, split_text_into_chapters
 
 
 client = TestClient(app)
@@ -85,6 +88,61 @@ def test_analyzer_requires_api_key(monkeypatch):
         analyzer.analyze_text("测试文本")
     assert exc.value.status_code == 503
     assert "OPENAI_API_KEY" in str(exc.value.detail)
+
+
+def test_llm_analysis_accepts_missing_optional_segment_fields():
+    result = analyzer.LlmAnalysis.model_validate(
+        {
+            "segments": [
+                {
+                    "type": "narration",
+                    "text": "沈红鱼看着舞台上的江宇，",
+                }
+            ]
+        }
+    )
+    normalized = analyzer.normalize_llm_analysis([], result, "沈红鱼看着舞台上的江宇，")
+
+    assert normalized["segments"][0]["confidence"] == 0.6
+    assert normalized["segments"][0]["reason"] == "LLM 未提供原因"
+
+
+def test_llm_prompt_keeps_audience_chants_as_narration():
+    parser = PydanticOutputParser(pydantic_object=analyzer.LlmAnalysis)
+    prompt = analyzer.build_prompt(ChatPromptTemplate, parser)
+    rendered = prompt.format(text="“江宇滚出娱乐圈！”")
+
+    assert "观众喊话、辱骂、口号" in rendered
+    assert "必须标为 narration" in rendered
+
+
+def test_split_text_into_chapters_detects_common_headings():
+    text = "第一章 登台\n内容一。\n\n## 第二章 唱歌\n内容二。"
+    chapters = split_text_into_chapters(text)
+
+    assert [chapter.title for chapter in chapters] == ["第一章 登台", "## 第二章 唱歌"]
+
+
+def test_merge_llm_analyses_preserves_chapter_metadata():
+    chapters = [
+        TextChapter(id="chap-001", title="第一章", text="内容一"),
+        TextChapter(id="chap-002", title="第二章", text="内容二"),
+    ]
+    first = analyzer.LlmAnalysis(segments=[analyzer.LlmSegment(type="narration", text="内容一")])
+    second = analyzer.LlmAnalysis(segments=[analyzer.LlmSegment(type="narration", text="内容二")])
+
+    merged = analyzer.merge_llm_analyses([(chapters[0], first), (chapters[1], second)], chapters, "内容一\n内容二")
+
+    assert [segment["chapterId"] for segment in merged["segments"]] == ["chap-001", "chap-002"]
+    assert [chapter["title"] for chapter in merged["chapters"]] == ["第一章", "第二章"]
+
+
+def test_chapters_endpoint_exposes_project_chapters():
+    created = client.post("/api/projects", json={"text": "第一章 登台\n内容一。\n\n第二章 唱歌\n内容二。"})
+    response = client.get(f"/api/projects/{created.json()['id']}/chapters")
+
+    assert response.status_code == 200
+    assert [chapter["title"] for chapter in response.json()["chapters"]] == ["第一章 登台", "第二章 唱歌"]
 
 
 def test_plain_narration_flow(monkeypatch):

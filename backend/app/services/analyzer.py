@@ -8,24 +8,27 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from ..config import ConfigError, require_env
+from .chapter_service import TextChapter, split_text_into_chapters
+
+DEFAULT_CHUNK_CHARS = 1200
 
 
 class LlmSegment(BaseModel):
     type: Literal["narration", "lyric"] = Field(description="Segment type.")
     text: str = Field(description="Original text for this segment.")
-    confidence: float = Field(ge=0.0, le=1.0, description="Confidence for the segment classification.")
-    reason: str = Field(description="Short Chinese explanation for the classification.")
+    confidence: float = Field(default=0.6, ge=0.0, le=1.0, description="Confidence for the segment classification.")
+    reason: str = Field(default="LLM 未提供原因", description="Short Chinese explanation for the classification.")
     durationSec: float | None = Field(default=None, ge=0.5, description="Recommended duration in seconds.")
     songClipStartSec: float | None = Field(default=None, ge=0.0, description="Optional song clip start time.")
     songClipEndSec: float | None = Field(default=None, ge=0.0, description="Optional song clip end time.")
 
 
 class LlmSongCandidate(BaseModel):
-    title: str = Field(description="Guessed song title, or 待确认歌曲 if unknown.")
-    artist: str = Field(description="Guessed artist, or 待确认歌手 if unknown.")
+    title: str = Field(default="待确认歌曲", description="Guessed song title, or 待确认歌曲 if unknown.")
+    artist: str = Field(default="待确认歌手", description="Guessed artist, or 待确认歌手 if unknown.")
     matchedLyrics: list[str] = Field(default_factory=list, description="Lyrics lines that triggered this candidate.")
-    confidence: float = Field(ge=0.0, le=1.0, description="Confidence for the song candidate.")
-    note: str = Field(description="Short Chinese note for user confirmation.")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Confidence for the song candidate.")
+    note: str = Field(default="LLM 推测，需用户确认。", description="Short Chinese note for user confirmation.")
 
 
 class LlmAnalysis(BaseModel):
@@ -51,7 +54,7 @@ def analyze_text(text: str) -> dict:
 
     cleaned = normalize_text(text)
     if not cleaned:
-        return build_analysis([], [], engine="langchain")
+        return build_analysis([], [], engine="langchain", chapters=[])
 
     model = os.getenv("OPENAI_MODEL", "gpt-5-nano")
     base_url = os.getenv("OPENAI_BASE_URL") or None
@@ -65,7 +68,23 @@ def analyze_text(text: str) -> dict:
         llm_kwargs["base_url"] = base_url
 
     parser = PydanticOutputParser(pydantic_object=LlmAnalysis)
-    prompt = ChatPromptTemplate.from_messages(
+    prompt = build_prompt(ChatPromptTemplate, parser)
+    llm = ChatOpenAI(**llm_kwargs)
+    chapters = split_text_into_chapters(cleaned)
+    chunk_inputs = build_chunk_inputs(chapters, int(os.getenv("ANALYZER_CHUNK_CHARS", DEFAULT_CHUNK_CHARS)))
+    try:
+        analyzed_chunks = [
+            (chapter, (prompt | llm | parser).invoke({"text": chunk}))
+            for chapter, chunk in chunk_inputs
+        ]
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LangChain analyzer failed: {exc}") from exc
+
+    return merge_llm_analyses(analyzed_chunks, chapters, cleaned)
+
+
+def build_prompt(chat_prompt_template, parser):
+    return chat_prompt_template.from_messages(
         [
             (
                 "system",
@@ -75,9 +94,11 @@ def analyze_text(text: str) -> dict:
                         "任务：把输入文本拆成适合配音和歌曲替换的连续段落。",
                         "只按原文顺序分段，不要改写原文，不要补写正文。",
                         "把普通叙述、对话、旁白标为 narration。",
-                        "把明显歌词、歌名提示、角色正在唱的内容、可被歌曲片段替换的段落标为 lyric。",
+                        "只有真实歌曲歌词、歌名提示、明确在唱歌且可用歌曲片段替换的内容，才能标为 lyric。",
+                        "观众喊话、辱骂、口号、弹幕、普通台词、角色对白都必须标为 narration，不能标为 lyric。",
                         "如果能从歌词或书名号推测歌曲，给 songCandidates；不确定时用 待确认歌曲/待确认歌手。",
                         "durationSec 需要给前端默认时间轴使用；中文旁白按自然语速估算，歌词至少 4 秒。",
+                        "confidence 和 reason 必须为每个 segment 提供；如果不确定，confidence 用 0.6。",
                         "reason 和 note 用简短中文。",
                         "必须只输出 JSON，不要输出 Markdown，不要输出解释。",
                         "{format_instructions}",
@@ -87,19 +108,81 @@ def analyze_text(text: str) -> dict:
             ("human", "{text}"),
         ]
     ).partial(format_instructions=parser.get_format_instructions())
-    llm = ChatOpenAI(**llm_kwargs)
-    try:
-        result = (prompt | llm | parser).invoke({"text": cleaned})
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"LangChain analyzer failed: {exc}") from exc
-
-    return normalize_llm_analysis(result, cleaned)
 
 
-def normalize_llm_analysis(result: LlmAnalysis, source_text: str) -> dict:
+def split_text_for_llm(text: str, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+
+    units = [unit.strip() for unit in re.split(r"(\n\s*\n)", text) if unit.strip()]
+    if len(units) <= 1:
+        units = [unit.strip() for unit in re.split(r"(?<=[。！？!?])", text) if unit.strip()]
+
+    chunks: list[str] = []
+    current = ""
+    for unit in units:
+        separator = "\n\n" if current else ""
+        if current and len(current) + len(separator) + len(unit) > max_chars:
+            chunks.append(current)
+            current = unit
+        else:
+            current = f"{current}{separator}{unit}" if current else unit
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def build_chunk_inputs(chapters: list[TextChapter], max_chars: int) -> list[tuple[TextChapter, str]]:
+    inputs: list[tuple[TextChapter, str]] = []
+    for chapter in chapters:
+        chunks = split_text_for_llm(chapter.text, max_chars)
+        for chunk_index, chunk in enumerate(chunks):
+            chunk_header = f"章节：{chapter.title}"
+            if len(chunks) > 1:
+                chunk_header = f"{chunk_header}\n分块：{chunk_index + 1}/{len(chunks)}"
+            inputs.append((chapter, f"{chunk_header}\n\n{chunk}"))
+    return inputs
+
+
+def merge_llm_analyses(analyzed_chunks: list[tuple[TextChapter, LlmAnalysis]], chapters: list[TextChapter], source_text: str) -> dict:
+    if not analyzed_chunks:
+        return normalize_llm_analysis([], LlmAnalysis(segments=[]), source_text, chapters)
+
+    merged_segments: list[LlmSegment] = []
+    segment_chapters: list[TextChapter] = []
+    merged_candidates: list[LlmSongCandidate] = []
+    seen_candidates: set[tuple[str, str]] = set()
+
+    for chapter, result in analyzed_chunks:
+        merged_segments.extend(result.segments)
+        segment_chapters.extend([chapter] * len(result.segments))
+        for candidate in result.songCandidates:
+            key = (candidate.title.strip(), candidate.artist.strip())
+            if key in seen_candidates:
+                continue
+            seen_candidates.add(key)
+            merged_candidates.append(candidate)
+
+    return normalize_llm_analysis(segment_chapters, LlmAnalysis(segments=merged_segments, songCandidates=merged_candidates), source_text, chapters)
+
+
+def normalize_llm_analysis(
+    segment_chapters: list[TextChapter],
+    result: LlmAnalysis,
+    source_text: str,
+    chapters: list[TextChapter] | None = None,
+) -> dict:
     llm_segments = result.segments or []
     if not llm_segments:
         llm_segments = [LlmSegment(type="narration", text=source_text, confidence=0.5, reason="LLM 未返回分段，按旁白处理")]
+        fallback_chapters = split_text_into_chapters(source_text)
+        segment_chapters = [fallback_chapters[0]] if fallback_chapters else []
+
+    if len(segment_chapters) < len(llm_segments):
+        fallback_chapters = split_text_into_chapters(source_text)
+        default_chapter = segment_chapters[-1] if segment_chapters else fallback_chapters[0]
+        segment_chapters = [*segment_chapters, *([default_chapter] * (len(llm_segments) - len(segment_chapters)))]
 
     segments = []
     cursor = 0.0
@@ -114,10 +197,13 @@ def normalize_llm_analysis(result: LlmAnalysis, source_text: str) -> dict:
         if item.type == "narration":
             song_clip_start = 0.0
             song_clip_end = 0.0
+        chapter = segment_chapters[index]
         segments.append(
             {
                 "id": f"seg-{len(segments) + 1:03d}",
                 "index": len(segments),
+                "chapterId": chapter.id,
+                "chapterTitle": chapter.title,
                 "type": item.type,
                 "text": text,
                 "startSec": round(cursor, 2),
@@ -141,12 +227,13 @@ def normalize_llm_analysis(result: LlmAnalysis, source_text: str) -> dict:
         for candidate in result.songCandidates
     ]
 
-    return build_analysis(segments, candidates, engine="langchain")
+    return build_analysis(segments, candidates, engine="langchain", chapters=chapters or segment_chapters)
 
 
-def build_analysis(segments: list[dict], candidates: list[dict], engine: str) -> dict:
+def build_analysis(segments: list[dict], candidates: list[dict], engine: str, chapters: list[TextChapter]) -> dict:
     return {
         "analysisEngine": engine,
+        "chapters": [chapter.public_dict() for chapter in chapters],
         "segments": segments,
         "songCandidates": candidates,
         "timeline": {

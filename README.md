@@ -41,14 +41,16 @@ npm run dev
 ```powershell
 python -m backend.app.cli .\story.txt
 python -m backend.app.cli .\story.txt --song .\song.mp3 --render
+python -m backend.app.cli .\story.txt --chapters-only
 ```
 
-CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、分析、上传歌曲和渲染 service。默认会创建项目并执行文本分析；传 `--no-analyze` 时只创建项目。
+CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节切分、分析、上传歌曲和渲染 service。默认会创建项目并执行章节切分与文本分析；传 `--chapters-only` 时只输出章节切分结果，传 `--no-analyze` 时创建项目并输出章节但不调用 LLM。
 
 ## 当前能力
 
 - 支持粘贴文本或上传 `.txt` 创建项目。
 - LangChain LLM 分析器会拆分旁白/疑似歌词段，并给出歌曲候选提示。
+- 独立章节切分 service 会先识别大段 txt 的章节，再按章节送入 LLM 分析。
 - 支持上传单首 MP3 作为全篇 BGM。
 - 支持在页面中调整段落类型、时长、BGM 音量和歌曲起点。
 - 后端导出会优先生成旁白 WAV。

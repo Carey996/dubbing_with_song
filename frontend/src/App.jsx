@@ -16,6 +16,7 @@ function App() {
   const [songFile, setSongFile] = useState(null);
   const [project, setProject] = useState(null);
   const [analysis, setAnalysis] = useState(null);
+  const [chapters, setChapters] = useState([]);
   const [timeline, setTimeline] = useState(emptyTimeline);
   const [renderResult, setRenderResult] = useState(null);
   const [busy, setBusy] = useState('');
@@ -47,6 +48,7 @@ function App() {
       }
       setProject(data);
       setAnalysis(null);
+      await loadChapters(data.id);
       setTimeline(emptyTimeline);
     } catch (err) {
       setError(err.message);
@@ -62,12 +64,19 @@ function App() {
     try {
       const data = await request(`/api/projects/${project.id}/analyze`, { method: 'POST' });
       setAnalysis(data);
+      setChapters(data.chapters || chapters);
       setTimeline(data.timeline);
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy('');
     }
+  }
+
+  async function loadChapters(projectId = project?.id) {
+    if (!projectId) return;
+    const data = await request(`/api/projects/${projectId}/chapters`);
+    setChapters(data.chapters || []);
   }
 
   async function uploadSong() {
@@ -147,6 +156,7 @@ function App() {
         </div>
         <div className="status-strip">
           <span>{project ? `项目 ${project.id}` : '未创建项目'}</span>
+          <span>{chapters.length} 章</span>
           <span>{timeline.segments.length} 段</span>
           <span>{totals.duration}s</span>
         </div>
@@ -178,6 +188,10 @@ function App() {
           <button onClick={analyzeProject} disabled={busy || !project}>
             <Sparkles size={18} />
             AI 分析
+          </button>
+          <button onClick={() => loadChapters()} disabled={busy || !project}>
+            <FileText size={18} />
+            章节预览
           </button>
 
           <PanelTitle icon={<Music />} title="歌曲文件" />
@@ -258,6 +272,14 @@ function App() {
             </div>
           )}
 
+          {chapters.length > 0 && (
+            <div className="chapter-list">
+              {chapters.map((chapter) => (
+                <span key={chapter.id}>{chapter.title} · {chapter.textLength} 字</span>
+              ))}
+            </div>
+          )}
+
           <div className="segment-list">
             {timeline.segments.map((segment) => (
               <article className={`segment ${segment.type}`} key={segment.id}>
@@ -266,6 +288,7 @@ function App() {
                     <option value="narration">旁白</option>
                     <option value="lyric">歌词</option>
                   </select>
+                  <span className="chapter-pill">{segment.chapterTitle || '正文'}</span>
                   <span>{segment.startSec}s</span>
                   <label>
                     时长

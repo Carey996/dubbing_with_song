@@ -217,11 +217,26 @@ input[type="range"] {
   width: 100%;
 }
 
-.song-candidates {
+.song-candidates,
+.chapter-list {
   margin-top: 14px;
   padding: 14px;
   display: grid;
   gap: 10px;
+}
+
+.chapter-list {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.chapter-list span,
+.chapter-pill {
+  border: 1px solid #d4dde6;
+  border-radius: 999px;
+  color: #405365;
+  background: #f7fafc;
+  padding: 7px 10px;
+  font-size: 13px;
 }
 
 .song-candidates article {
@@ -270,7 +285,7 @@ input[type="range"] {
 
 .segment-head {
   display: grid;
-  grid-template-columns: 140px 80px 120px;
+  grid-template-columns: 140px minmax(120px, 1fr) 80px 120px;
   align-items: center;
   gap: 10px;
 }

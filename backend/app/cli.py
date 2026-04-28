@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from .config import load_env
 from .services.analyzer import analyze_text
+from .services.chapter_service import split_text_into_chapters
 from .services.project_store import create_project, get_project, save_analysis, save_song_file
 from .services.renderer import render_project
 from .services.text_source import read_txt_file
@@ -23,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--song", type=Path, help="Optional user-provided MP3 file.")
     parser.add_argument("--render", action="store_true", help="Render output audio after analysis.")
     parser.add_argument("--no-analyze", action="store_true", help="Only create the project; skip text analysis.")
+    parser.add_argument("--chapters-only", action="store_true", help="Create the project and print chapter split only.")
     parser.add_argument("--include-analysis", action="store_true", help="Print full analysis payload.")
     return parser
 
@@ -39,6 +41,11 @@ def run(argv: Sequence[str] | None = None) -> dict:
             "txtFile": str(args.txt_file),
         },
     }
+    chapters = split_text_into_chapters(project.text)
+    payload["chapters"] = [chapter.public_dict() for chapter in chapters]
+
+    if args.chapters_only:
+        return payload
 
     should_analyze = not args.no_analyze or args.render
     if should_analyze:

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from starlette.datastructures import UploadFile
 
 from ..services.analyzer import analyze_text
+from ..services.chapter_service import split_text_into_chapters
 from ..services.project_store import (
     create_project,
     get_project,
@@ -48,6 +49,16 @@ def analyze_project_endpoint(project_id: str) -> dict:
     analysis = analyze_text(project.text)
     save_analysis(project_id, analysis)
     return analysis
+
+
+@router.get("/projects/{project_id}/chapters")
+def list_project_chapters_endpoint(project_id: str) -> dict:
+    project = get_project(project_id)
+    chapters = split_text_into_chapters(project.text)
+    return {
+        "projectId": project.id,
+        "chapters": [chapter.public_dict(include_text=False) for chapter in chapters],
+    }
 
 
 @router.post("/projects/{project_id}/song-file")
