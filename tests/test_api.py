@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from backend.app.main import app
@@ -108,12 +107,19 @@ def test_llm_analysis_accepts_missing_optional_segment_fields():
 
 
 def test_llm_prompt_keeps_audience_chants_as_narration():
-    parser = PydanticOutputParser(pydantic_object=analyzer.LlmAnalysis)
-    prompt = analyzer.build_prompt(ChatPromptTemplate, parser)
+    prompt = analyzer.build_prompt(ChatPromptTemplate, analyzer.get_format_instructions())
     rendered = prompt.format(text="“江宇滚出娱乐圈！”")
 
     assert "观众喊话、辱骂、口号" in rendered
     assert "必须标为 narration" in rendered
+
+
+def test_parse_llm_analysis_drops_empty_segment_objects():
+    content = '{"segments":[{"type":"narration","text":"正文。"},{}],"songCandidates":[]}'
+    parsed = analyzer.parse_llm_analysis(content)
+
+    assert len(parsed.segments) == 1
+    assert parsed.segments[0].text == "正文。"
 
 
 def test_split_text_into_chapters_detects_common_headings():

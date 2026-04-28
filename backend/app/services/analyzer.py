@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 from typing import Literal
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from pydantic import BaseModel, Field
 
 from ..config import ConfigError, require_env
@@ -43,7 +45,6 @@ def analyze_text(text: str) -> dict:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     try:
-        from langchain_core.output_parsers import PydanticOutputParser
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_openai import ChatOpenAI
     except ImportError as exc:
@@ -67,14 +68,13 @@ def analyze_text(text: str) -> dict:
     if base_url:
         llm_kwargs["base_url"] = base_url
 
-    parser = PydanticOutputParser(pydantic_object=LlmAnalysis)
-    prompt = build_prompt(ChatPromptTemplate, parser)
+    prompt = build_prompt(ChatPromptTemplate, get_format_instructions())
     llm = ChatOpenAI(**llm_kwargs)
     chapters = split_text_into_chapters(cleaned)
     chunk_inputs = build_chunk_inputs(chapters, int(os.getenv("ANALYZER_CHUNK_CHARS", DEFAULT_CHUNK_CHARS)))
     try:
         analyzed_chunks = [
-            (chapter, (prompt | llm | parser).invoke({"text": chunk}))
+            (chapter, parse_llm_analysis((prompt | llm).invoke({"text": chunk}).content))
             for chapter, chunk in chunk_inputs
         ]
     except Exception as exc:
@@ -83,7 +83,7 @@ def analyze_text(text: str) -> dict:
     return merge_llm_analyses(analyzed_chunks, chapters, cleaned)
 
 
-def build_prompt(chat_prompt_template, parser):
+def build_prompt(chat_prompt_template, format_instructions: str):
     return chat_prompt_template.from_messages(
         [
             (
@@ -107,7 +107,72 @@ def build_prompt(chat_prompt_template, parser):
             ),
             ("human", "{text}"),
         ]
-    ).partial(format_instructions=parser.get_format_instructions())
+    ).partial(format_instructions=format_instructions)
+
+
+def get_format_instructions() -> str:
+    return """
+输出必须是一个 JSON object，结构如下：
+{
+  "segments": [
+    {
+      "type": "narration 或 lyric",
+      "text": "原文片段",
+      "confidence": 0.0 到 1.0,
+      "reason": "简短中文原因",
+      "durationSec": 秒数,
+      "songClipStartSec": 0,
+      "songClipEndSec": 秒数
+    }
+  ],
+  "songCandidates": [
+    {
+      "title": "歌曲名或待确认歌曲",
+      "artist": "歌手或待确认歌手",
+      "matchedLyrics": ["命中的歌词"],
+      "confidence": 0.0 到 1.0,
+      "note": "简短中文说明"
+    }
+  ]
+}
+不要在 segments 中输出空对象。不要省略 type 和 text。
+""".strip()
+
+
+def parse_llm_analysis(content: str) -> LlmAnalysis:
+    try:
+        payload = json.loads(extract_json_object(content))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"LLM returned invalid JSON: {exc}") from exc
+
+    payload["segments"] = [
+        segment
+        for segment in payload.get("segments", [])
+        if isinstance(segment, dict) and segment.get("type") and segment.get("text")
+    ]
+    payload["songCandidates"] = [
+        candidate
+        for candidate in payload.get("songCandidates", [])
+        if isinstance(candidate, dict)
+    ]
+
+    try:
+        return LlmAnalysis.model_validate(payload)
+    except ValidationError as exc:
+        raise ValueError(f"LLM JSON did not match expected schema: {exc}") from exc
+
+
+def extract_json_object(content: str) -> str:
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise json.JSONDecodeError("No JSON object found", stripped, 0)
+    return stripped[start:end + 1]
 
 
 def split_text_for_llm(text: str, max_chars: int) -> list[str]:
