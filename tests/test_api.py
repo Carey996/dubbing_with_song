@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -13,6 +15,7 @@ from backend.app.services.chapter_service import TextChapter, split_text_into_ch
 
 
 client = TestClient(app)
+TEST_TMP_DIR = Path("pytest-cache-files-ai-tts")
 
 
 def fake_analysis(text: str) -> dict:
@@ -251,16 +254,18 @@ def test_song_upload_accepts_mp3_file():
     assert uploaded.json()["filename"] == "demo.mp3"
 
 
-def test_find_ffmpeg_prefers_configured_path(monkeypatch, tmp_path):
-    ffmpeg_path = tmp_path / "ffmpeg.exe"
+def test_find_ffmpeg_prefers_configured_path(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    ffmpeg_path = TEST_TMP_DIR / "ffmpeg.exe"
     ffmpeg_path.write_text("fake ffmpeg", encoding="utf-8")
     monkeypatch.setenv("FFMPEG_PATH", str(ffmpeg_path))
 
     assert renderer.find_ffmpeg() == str(ffmpeg_path)
 
 
-def test_synthesize_wav_uses_openai_speech_provider(monkeypatch, tmp_path):
-    output_path = tmp_path / "speech.wav"
+def test_synthesize_wav_uses_openai_speech_provider(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    output_path = TEST_TMP_DIR / "speech.wav"
     calls = []
 
     class FakeSpeech:
@@ -293,11 +298,11 @@ def test_synthesize_wav_uses_openai_speech_provider(monkeypatch, tmp_path):
     assert calls[1]["response_format"] == "wav"
 
 
-def test_synthesize_wav_requires_ai_tts_config(monkeypatch, tmp_path):
+def test_synthesize_wav_requires_ai_tts_config(monkeypatch):
     monkeypatch.delenv("TTS_API_KEY", raising=False)
 
     with pytest.raises(HTTPException) as exc:
-        renderer.synthesize_wav("测试旁白", tmp_path / "speech.wav")
+        renderer.synthesize_wav("测试旁白", TEST_TMP_DIR / "speech.wav")
 
     assert exc.value.status_code == 503
     assert "TTS_API_KEY" in str(exc.value.detail)

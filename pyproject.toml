@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.9",
     "langchain-openai>=0.3.35",
+    "openai>=2.32.0",
 ]
 
 [project.scripts]

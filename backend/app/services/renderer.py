@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import wave
 from pathlib import Path
 
 from fastapi import HTTPException
+from openai import OpenAI
 
 from .project_store import Project, read_timeline
+
+DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
+DEFAULT_TTS_VOICE = "alloy"
+KNOWN_FFMPEG_PATHS = [
+    Path(r"C:\Program Files\Netease\POPO\popo\POPORecorder\ffmpeg.exe"),
+]
 
 
 def render_project(project: Project) -> dict:
@@ -19,7 +27,7 @@ def render_project(project: Project) -> dict:
     narration_path = render_dir / "narration.wav"
     build_narration_track(timeline, chunks_dir, narration_path, include_lyrics=not project.song_path.exists())
 
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = find_ffmpeg()
     if project.song_path.exists() and ffmpeg:
         output_path = render_dir / "mixed.mp3"
         mix_with_song(ffmpeg, narration_path, project.song_path, output_path, timeline)
@@ -71,35 +79,51 @@ def build_narration_track(timeline: dict, chunks_dir: Path, output_path: Path, i
 
 
 def synthesize_wav(text: str, output_path: Path) -> None:
-    script_path = output_path.with_suffix(".ps1")
-    input_path = output_path.with_suffix(".txt")
-    input_path.write_text(text or " ", encoding="utf-8")
-    script_path.write_text(
-        """
-Add-Type -AssemblyName System.Speech
-$text = Get-Content -LiteralPath $args[0] -Raw -Encoding UTF8
-$speaker = New-Object System.Speech.Synthesis.SpeechSynthesizer
-$speaker.Rate = 0
-$speaker.Volume = 100
-$speaker.SetOutputToWaveFile($args[1])
-$speaker.Speak($text)
-$speaker.Dispose()
-""".strip(),
-        encoding="utf-8",
-    )
+    synthesize_wav_with_openai(text, output_path)
 
-    powershell = shutil.which("powershell") or shutil.which("pwsh")
-    if powershell:
-        result = subprocess.run(
-            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), str(input_path), str(output_path)],
-            capture_output=True,
-            text=True,
-            timeout=60,
+
+def synthesize_wav_with_openai(text: str, output_path: Path) -> None:
+    api_key = os.getenv("TTS_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Missing required TTS config: TTS_API_KEY. Set it in .env.")
+
+    client_kwargs = {"api_key": api_key}
+    base_url = os.getenv("TTS_BASE_URL")
+    if base_url:
+        client_kwargs["base_url"] = base_url
+
+    client = OpenAI(**client_kwargs)
+    try:
+        response = client.audio.speech.create(
+            model=os.getenv("TTS_MODEL", DEFAULT_TTS_MODEL),
+            voice=os.getenv("TTS_VOICE", DEFAULT_TTS_VOICE),
+            input=text or " ",
+            response_format="wav",
+            speed=float(os.getenv("TTS_SPEED", "1.0")),
         )
-        if result.returncode == 0 and output_path.exists():
-            return
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        response.write_to_file(output_path)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"AI TTS failed: {exc}") from exc
 
-    create_silence_wav(output_path, estimate_spoken_duration(text), (1, 2, 22050))
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise HTTPException(status_code=502, detail="AI TTS returned an empty audio file.")
+
+
+def find_ffmpeg() -> str | None:
+    configured = os.getenv("FFMPEG_PATH")
+    if configured and Path(configured).is_file():
+        return configured
+
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+
+    for path in KNOWN_FFMPEG_PATHS:
+        if path.is_file():
+            return str(path)
+
+    return None
 
 
 def create_silence_wav(path: Path, duration: float, params: tuple[int, int, int]) -> None:

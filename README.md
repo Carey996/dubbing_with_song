@@ -20,6 +20,24 @@ OPENAI_MODEL=gemma-4-e4b-it@q4_k_m
 
 如果换成 OpenAI 官方服务，把 `OPENAI_BASE_URL` 删除或改成官方兼容地址，并把 `OPENAI_API_KEY` 改成真实 key。文本分析只走 LangChain LLM；没有 `OPENAI_API_KEY` 会直接报配置错误。
 
+TTS 独立走 AI speech API 配置，不再使用 PowerShell/System.Speech 降级：
+
+```env
+TTS_API_KEY=你的 TTS API key
+TTS_BASE_URL=
+TTS_MODEL=gpt-4o-mini-tts
+TTS_VOICE=alloy
+TTS_SPEED=1.0
+```
+
+`TTS_BASE_URL` 留空时使用 OpenAI 官方 SDK 默认地址；如果找到本地 OpenAI-compatible TTS 服务，再改成它的 `/v1` 地址。当前 LM Studio 的本地 OpenAI-compatible 服务可用于文本模型，但不支持本项目需要的 `/v1/audio/speech` 方式，不能直接作为 TTS 服务。
+
+如果 `ffmpeg` 不在 PATH，可以显式配置：
+
+```env
+FFMPEG_PATH=C:\Program Files\Netease\POPO\popo\POPORecorder\ffmpeg.exe
+```
+
 后端：
 
 ```powershell
@@ -54,7 +72,7 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节
 - 独立章节切分 service 会先识别大段 txt 的章节，再按章节送入 LLM 分析。
 - 支持上传单首 MP3 作为全篇 BGM。
 - 支持在页面中调整段落类型、时长、BGM 音量和歌曲起点。
-- 后端导出会优先生成旁白 WAV。
+- 后端导出会优先通过 AI TTS 生成旁白 WAV。
 - 如果系统安装了 `ffmpeg`，且项目上传了 MP3，后端会导出混音 MP3。
 - 支持 `GET /api/projects/{id}/chapters` 预览章节，以及 `POST /api/projects/{id}/chapters/{chapter_id}/analyze` 按章节分析。
 
@@ -64,10 +82,9 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节
 
 `POST /api/projects` 只接受 JSON：`{"text": "..."}`。txt 文件上传独立走 `POST /api/projects/text-file`，后端解码为文本后复用同一个项目创建服务入口。MP3 上传独立走 `POST /api/projects/{id}/song-file` 的 multipart 表单，避免创建接口同时兼容多种输入格式。
 
-后端 TTS 在 Windows 上优先使用 `System.Speech` 生成 WAV；如果不可用，会生成静音占位音频以保证接口流程可走通。没有 `ffmpeg` 时无法在后端混入 MP3，但前端仍可上传、预览、编辑时间轴，并导出旁白版本。
+后端 TTS 必须配置可用的 AI speech API。没有 `TTS_API_KEY` 或 TTS 服务不可用时，渲染接口会直接返回错误，不再降级生成 PowerShell 语音或静音占位。没有 `ffmpeg` 时无法在后端混入 MP3，但仍会导出旁白 WAV。
 
 ## 后续增强
 
-- 接入真实 LLM 替换当前启发式分析器。
-- 接入更高质量 TTS 服务。
+- 接入更多本地 OpenAI-compatible TTS 服务。
 - 支持多首歌、多角色配音和自动歌词时间轴对齐。

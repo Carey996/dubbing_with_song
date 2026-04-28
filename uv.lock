@@ -168,6 +168,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "langchain-openai" },
+    { name = "openai" },
     { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -183,6 +184,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "langchain-openai", specifier = ">=0.3.35" },
+    { name = "openai", specifier = ">=2.32.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
