@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Download, FileAudio, FileText, Music, Play, Sparkles, Upload } from 'lucide-react';
+import { BookOpen, Download, FileAudio, FileText, Music, Play, Sparkles, Upload } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
@@ -17,6 +17,7 @@ function App() {
   const [project, setProject] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [chapters, setChapters] = useState([]);
+  const [selectedChapterId, setSelectedChapterId] = useState('');
   const [timeline, setTimeline] = useState(emptyTimeline);
   const [renderResult, setRenderResult] = useState(null);
   const [busy, setBusy] = useState('');
@@ -27,6 +28,18 @@ function App() {
     const lyricCount = timeline.segments.filter((segment) => segment.type === 'lyric').length;
     return { duration: duration.toFixed(1), lyricCount };
   }, [timeline]);
+
+  const selectedChapter = useMemo(
+    () => chapters.find((chapter) => chapter.id === selectedChapterId) || chapters[0] || null,
+    [chapters, selectedChapterId],
+  );
+
+  function applyChapters(nextChapters) {
+    setChapters(nextChapters);
+    setSelectedChapterId((currentId) => (
+      nextChapters.some((chapter) => chapter.id === currentId) ? currentId : nextChapters[0]?.id || ''
+    ));
+  }
 
   async function createProject() {
     setBusy('creating');
@@ -62,9 +75,12 @@ function App() {
     setBusy('analyzing');
     setError('');
     try {
-      const data = await request(`/api/projects/${project.id}/analyze`, { method: 'POST' });
+      const url = selectedChapter
+        ? `/api/projects/${project.id}/chapters/${selectedChapter.id}/analyze`
+        : `/api/projects/${project.id}/analyze`;
+      const data = await request(url, { method: 'POST' });
       setAnalysis(data);
-      setChapters(data.chapters || chapters);
+      applyChapters(data.chapters || chapters);
       setTimeline(data.timeline);
     } catch (err) {
       setError(err.message);
@@ -76,7 +92,7 @@ function App() {
   async function loadChapters(projectId = project?.id) {
     if (!projectId) return;
     const data = await request(`/api/projects/${projectId}/chapters`);
-    setChapters(data.chapters || []);
+    applyChapters(data.chapters || []);
   }
 
   async function uploadSong() {
@@ -187,7 +203,7 @@ function App() {
           </button>
           <button onClick={analyzeProject} disabled={busy || !project}>
             <Sparkles size={18} />
-            AI 分析
+            {selectedChapter ? '分析当前章节' : 'AI 分析'}
           </button>
           <button onClick={() => loadChapters()} disabled={busy || !project}>
             <FileText size={18} />
@@ -273,10 +289,35 @@ function App() {
           )}
 
           {chapters.length > 0 && (
-            <div className="chapter-list">
-              {chapters.map((chapter) => (
-                <span key={chapter.id}>{chapter.title} · {chapter.textLength} 字</span>
-              ))}
+            <div className="chapter-preview">
+              <div className="chapter-actions">
+                <button type="button" onClick={() => setSelectedChapterId('')} className={!selectedChapterId ? 'primary' : ''}>
+                  全篇
+                </button>
+              </div>
+              <div className="chapter-list" aria-label="章节预览">
+                {chapters.map((chapter) => (
+                  <button
+                    key={chapter.id}
+                    type="button"
+                    className={`chapter-button ${selectedChapter?.id === chapter.id ? 'active' : ''}`}
+                    onClick={() => setSelectedChapterId(chapter.id)}
+                  >
+                    <BookOpen size={16} />
+                    <span>{chapter.title}</span>
+                    <small>{chapter.textLength} 字</small>
+                  </button>
+                ))}
+              </div>
+              {selectedChapter && (
+                <article className="chapter-detail">
+                  <div>
+                    <strong>{selectedChapter.title}</strong>
+                    <span>{selectedChapter.textLength} 字</span>
+                  </div>
+                  <p>{selectedChapter.text}</p>
+                </article>
+              )}
             </div>
           )}
 

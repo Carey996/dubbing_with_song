@@ -9,7 +9,7 @@ from backend.app.cli import run
 TEST_INPUT_DIR = Path("data/test-inputs")
 
 
-def fake_analysis(text: str) -> dict:
+def fake_analysis(text: str, chapters=None) -> dict:
     segments = [
         {
             "id": "seg-001",
@@ -35,6 +35,7 @@ def fake_analysis(text: str) -> dict:
     ] if "小星星" in text else []
     return {
         "analysisEngine": "test-double",
+        "chapters": [chapter.public_dict() for chapter in chapters] if chapters else [],
         "segments": segments,
         "songCandidates": candidates,
         "timeline": {

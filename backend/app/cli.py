@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--render", action="store_true", help="Render output audio after analysis.")
     parser.add_argument("--no-analyze", action="store_true", help="Only create the project; skip text analysis.")
     parser.add_argument("--chapters-only", action="store_true", help="Create the project and print chapter split only.")
+    parser.add_argument("--chapter", help="Analyze only one chapter id, for example chap-001.")
     parser.add_argument("--include-analysis", action="store_true", help="Print full analysis payload.")
     return parser
 
@@ -49,9 +50,19 @@ def run(argv: Sequence[str] | None = None) -> dict:
 
     should_analyze = not args.no_analyze or args.render
     if should_analyze:
-        analysis = analyze_text(project.text)
+        target_chapters = chapters
+        target_text = project.text
+        if args.chapter:
+            target_chapter = next((chapter for chapter in chapters if chapter.id == args.chapter), None)
+            if not target_chapter:
+                raise HTTPException(status_code=404, detail=f"Chapter not found: {args.chapter}")
+            target_chapters = [target_chapter]
+            target_text = target_chapter.text
+
+        analysis = analyze_text(target_text, chapters=target_chapters)
         save_analysis(project.id, analysis)
         payload["analysis"] = {
+            "scope": args.chapter or "all",
             "segmentCount": len(analysis["segments"]),
             "lyricCount": len([segment for segment in analysis["segments"] if segment["type"] == "lyric"]),
             "songCandidates": analysis["songCandidates"],

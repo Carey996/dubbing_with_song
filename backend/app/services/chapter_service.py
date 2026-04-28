@@ -33,21 +33,32 @@ def split_text_into_chapters(text: str) -> list[TextChapter]:
 
     for line in lines:
         stripped = line.strip()
+        if is_non_content_line(stripped):
+            continue
         if is_chapter_heading(stripped):
-            if current_lines:
-                chapters.append(make_chapter(len(chapters), current_title, "\n".join(current_lines)))
+            current_text = normalize_text("\n".join(current_lines))
+            if current_text:
+                chapters.append(make_chapter(len(chapters), current_title, current_text))
             current_title = stripped
             current_lines = []
         else:
             current_lines.append(line)
 
-    if current_lines:
-        chapters.append(make_chapter(len(chapters), current_title, "\n".join(current_lines)))
+    current_text = normalize_text("\n".join(current_lines))
+    if current_text:
+        chapters.append(make_chapter(len(chapters), current_title, current_text))
 
     if not chapters:
-        chapters.append(make_chapter(0, "正文", normalized))
+        fallback_text = normalize_text("\n".join(line for line in lines if not is_non_content_line(line.strip())))
+        if fallback_text:
+            chapters.append(make_chapter(0, "正文", fallback_text))
 
     return chapters
+
+
+def is_non_content_line(line: str) -> bool:
+    compact = re.sub(r"\s+", "", line)
+    return bool(compact) and not any(char.isalnum() for char in compact)
 
 
 def is_chapter_heading(line: str) -> bool:

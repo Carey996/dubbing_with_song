@@ -42,9 +42,10 @@ npm run dev
 python -m backend.app.cli .\story.txt
 python -m backend.app.cli .\story.txt --song .\song.mp3 --render
 python -m backend.app.cli .\story.txt --chapters-only
+python -m backend.app.cli .\story.txt --chapter chap-002
 ```
 
-CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节切分、分析、上传歌曲和渲染 service。默认会创建项目并执行章节切分与文本分析；传 `--chapters-only` 时只输出章节切分结果，传 `--no-analyze` 时创建项目并输出章节但不调用 LLM。
+CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节切分、分析、上传歌曲和渲染 service。默认会创建项目并执行章节切分与全篇文本分析；传 `--chapter chap-002` 时只分析指定章节，传 `--chapters-only` 时只输出章节切分结果，传 `--no-analyze` 时创建项目并输出章节但不调用 LLM。
 
 ## 当前能力
 
@@ -55,6 +56,7 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节
 - 支持在页面中调整段落类型、时长、BGM 音量和歌曲起点。
 - 后端导出会优先生成旁白 WAV。
 - 如果系统安装了 `ffmpeg`，且项目上传了 MP3，后端会导出混音 MP3。
+- 支持 `GET /api/projects/{id}/chapters` 预览章节，以及 `POST /api/projects/{id}/chapters/{chapter_id}/analyze` 按章节分析。
 
 ## 降级说明
 

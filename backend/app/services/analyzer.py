@@ -38,7 +38,7 @@ class LlmAnalysis(BaseModel):
     songCandidates: list[LlmSongCandidate] = Field(default_factory=list, description="Possible songs found from lyric text.")
 
 
-def analyze_text(text: str) -> dict:
+def analyze_text(text: str, chapters: list[TextChapter] | None = None) -> dict:
     try:
         api_key = require_env("OPENAI_API_KEY")
     except ConfigError as exc:
@@ -70,8 +70,8 @@ def analyze_text(text: str) -> dict:
 
     prompt = build_prompt(ChatPromptTemplate, get_format_instructions())
     llm = ChatOpenAI(**llm_kwargs)
-    chapters = split_text_into_chapters(cleaned)
-    chunk_inputs = build_chunk_inputs(chapters, int(os.getenv("ANALYZER_CHUNK_CHARS", DEFAULT_CHUNK_CHARS)))
+    target_chapters = chapters or split_text_into_chapters(cleaned)
+    chunk_inputs = build_chunk_inputs(target_chapters, int(os.getenv("ANALYZER_CHUNK_CHARS", DEFAULT_CHUNK_CHARS)))
     try:
         analyzed_chunks = [
             (chapter, parse_llm_analysis((prompt | llm).invoke({"text": chunk}).content))
@@ -80,7 +80,7 @@ def analyze_text(text: str) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LangChain analyzer failed: {exc}") from exc
 
-    return merge_llm_analyses(analyzed_chunks, chapters, cleaned)
+    return merge_llm_analyses(analyzed_chunks, target_chapters, cleaned)
 
 
 def build_prompt(chat_prompt_template, format_instructions: str):
@@ -93,6 +93,7 @@ def build_prompt(chat_prompt_template, format_instructions: str):
                         "你是一个中文有声内容制作助理。",
                         "任务：把输入文本拆成适合配音和歌曲替换的连续段落。",
                         "只按原文顺序分段，不要改写原文，不要补写正文。",
+                        "输入中以“章节：”或“分块：”开头的行只是上下文元信息，不能输出到任何 segment.text。",
                         "把普通叙述、对话、旁白标为 narration。",
                         "只有真实歌曲歌词、歌名提示、明确在唱歌且可用歌曲片段替换的内容，才能标为 lyric。",
                         "观众喊话、辱骂、口号、弹幕、普通台词、角色对白都必须标为 narration，不能标为 lyric。",
@@ -241,11 +242,11 @@ def normalize_llm_analysis(
     llm_segments = result.segments or []
     if not llm_segments:
         llm_segments = [LlmSegment(type="narration", text=source_text, confidence=0.5, reason="LLM 未返回分段，按旁白处理")]
-        fallback_chapters = split_text_into_chapters(source_text)
+        fallback_chapters = chapters or split_text_into_chapters(source_text)
         segment_chapters = [fallback_chapters[0]] if fallback_chapters else []
 
     if len(segment_chapters) < len(llm_segments):
-        fallback_chapters = split_text_into_chapters(source_text)
+        fallback_chapters = chapters or split_text_into_chapters(source_text)
         default_chapter = segment_chapters[-1] if segment_chapters else fallback_chapters[0]
         segment_chapters = [*segment_chapters, *([default_chapter] * (len(llm_segments) - len(segment_chapters)))]
 

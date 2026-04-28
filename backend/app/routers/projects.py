@@ -51,13 +51,24 @@ def analyze_project_endpoint(project_id: str) -> dict:
     return analysis
 
 
+@router.post("/projects/{project_id}/chapters/{chapter_id}/analyze")
+def analyze_project_chapter_endpoint(project_id: str, chapter_id: str) -> dict:
+    project = get_project(project_id)
+    chapters = split_text_into_chapters(project.text)
+    chapter = next((item for item in chapters if item.id == chapter_id), None)
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found.")
+
+    return analyze_text(chapter.text, chapters=[chapter])
+
+
 @router.get("/projects/{project_id}/chapters")
 def list_project_chapters_endpoint(project_id: str) -> dict:
     project = get_project(project_id)
     chapters = split_text_into_chapters(project.text)
     return {
         "projectId": project.id,
-        "chapters": [chapter.public_dict(include_text=False) for chapter in chapters],
+        "chapters": [chapter.public_dict(include_text=True) for chapter in chapters],
     }
 
 

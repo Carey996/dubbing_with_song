@@ -217,19 +217,81 @@ input[type="range"] {
   width: 100%;
 }
 
-.song-candidates,
-.chapter-list {
+.song-candidates {
   margin-top: 14px;
   padding: 14px;
   display: grid;
   gap: 10px;
 }
 
+.chapter-preview {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.chapter-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .chapter-list {
+  display: grid;
+  gap: 10px;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
-.chapter-list span,
+.chapter-button {
+  min-height: 40px;
+  justify-content: flex-start;
+  border-radius: 999px;
+  padding: 0 10px;
+}
+
+.chapter-button.active {
+  border-color: #176b87;
+  color: #176b87;
+  background: #eef8fb;
+}
+
+.chapter-button span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.chapter-button small,
+.chapter-detail span {
+  color: #5b6f7f;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chapter-detail {
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.chapter-detail div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chapter-detail p {
+  color: #1f2a37;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
 .chapter-pill {
   border: 1px solid #d4dde6;
   border-radius: 999px;
