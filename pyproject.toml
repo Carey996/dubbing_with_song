@@ -1,0 +1,24 @@
+[project]
+name = "dubbing-with-song"
+version = "0.1.0"
+description = "Local MVP for AI-assisted narration and user-provided song mixing."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+dubbing-with-song = "backend.app.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
