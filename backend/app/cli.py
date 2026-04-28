@@ -7,6 +7,7 @@ from typing import Sequence
 
 from fastapi import HTTPException
 
+from .config import load_env
 from .services.analyzer import analyze_text
 from .services.project_store import create_project, get_project, save_analysis, save_song_file
 from .services.renderer import render_project
@@ -27,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(argv: Sequence[str] | None = None) -> dict:
+    load_env()
     args = build_parser().parse_args(argv)
     text = read_txt_file(args.txt_file)
     project = create_project(text)

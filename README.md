@@ -4,10 +4,26 @@
 
 ## 运行
 
+先创建 `.env`：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+默认 `.env.example` 指向 LM Studio：
+
+```env
+OPENAI_API_KEY=lm-studio
+OPENAI_BASE_URL=http://127.0.0.1:1234/v1
+OPENAI_MODEL=gemma-4-e4b-it@q4_k_m
+```
+
+如果换成 OpenAI 官方服务，把 `OPENAI_BASE_URL` 删除或改成官方兼容地址，并把 `OPENAI_API_KEY` 改成真实 key。文本分析只走 LangChain LLM；没有 `OPENAI_API_KEY` 会直接报配置错误。
+
 后端：
 
 ```powershell
-uv run uvicorn backend.app.main:app --reload --port 8000
+python -m uvicorn backend.app.main:app --reload --port 28080
 ```
 
 前端：
@@ -18,7 +34,7 @@ npm install
 npm run dev
 ```
 
-打开 Vite 输出的本地地址，默认会把 `/api` 代理到 `http://127.0.0.1:8000`。
+打开 Vite 输出的本地地址，默认会把 `/api` 代理到 `http://127.0.0.1:28080`。
 
 本地 CLI：
 
@@ -32,7 +48,7 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、分析
 ## 当前能力
 
 - 支持粘贴文本或上传 `.txt` 创建项目。
-- 本地启发式分析器会拆分旁白/疑似歌词段，并给出歌曲候选提示。
+- LangChain LLM 分析器会拆分旁白/疑似歌词段，并给出歌曲候选提示。
 - 支持上传单首 MP3 作为全篇 BGM。
 - 支持在页面中调整段落类型、时长、BGM 音量和歌曲起点。
 - 后端导出会优先生成旁白 WAV。
