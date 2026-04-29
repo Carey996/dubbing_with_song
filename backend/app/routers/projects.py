@@ -13,6 +13,7 @@ from ..services.project_store import (
     complete_render_record,
     create_project,
     create_render_record,
+    delete_project,
     fail_render_record,
     get_project,
     list_analyses,
@@ -41,6 +42,11 @@ def list_projects_endpoint() -> dict:
 def create_project_endpoint(payload: CreateProjectRequest) -> dict:
     project = create_project(payload.text)
     return project.public_dict()
+
+
+@router.delete("/projects/{project_id}")
+def delete_project_endpoint(project_id: str) -> dict:
+    return delete_project(project_id)
 
 
 @router.post("/projects/text-file")
