@@ -44,13 +44,19 @@ class Project:
         return output_dir
 
     def public_dict(self, include_text: bool = False) -> dict:
+        latest_render = get_latest_render(self.id)
         payload = {
             "id": self.id,
+            "title": self.metadata.get("title") or derive_title(self.text),
             "createdAt": self.metadata["createdAt"],
+            "updatedAt": self.metadata.get("updatedAt", self.metadata["createdAt"]),
+            "status": self.metadata.get("status", "created"),
             "textLength": len(self.text),
             "hasAnalysis": self.analysis_path.exists(),
             "hasSong": self.song_path.exists(),
             "hasTimeline": self.timeline_path.exists(),
+            "hasRender": latest_render is not None,
+            "latestRender": latest_render,
         }
         if include_text:
             payload["text"] = self.text
@@ -132,12 +138,95 @@ def get_project(project_id: str) -> Project:
     if not metadata_path.exists() or not source_path.exists():
         raise HTTPException(status_code=404, detail="Project not found.")
 
+    metadata = read_json(metadata_path)
+    row = get_project_row(project_id)
+    if row:
+        metadata = {
+            **metadata,
+            "title": row["title"],
+            "updatedAt": row["updated_at"],
+            "status": row["status"],
+        }
+
     return Project(
         id=project_id,
         text=source_path.read_text(encoding="utf-8"),
         root=root,
-        metadata=read_json(metadata_path),
+        metadata=metadata,
     )
+
+
+def get_project_row(project_id: str) -> dict | None:
+    initialize_database()
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_latest_render(project_id: str) -> dict | None:
+    initialize_database()
+    with transaction() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM renders
+            WHERE project_id = ? AND status = 'succeeded'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "status": row["status"],
+        "outputUrl": row["output_url"],
+        "outputPath": row["output_path"],
+        "message": row["message"],
+        "warnings": json.loads(row["warnings_json"] or "[]"),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def import_existing_projects() -> None:
+    initialize_database()
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    for root in PROJECTS_DIR.iterdir():
+        metadata_path = root / "metadata.json"
+        source_path = root / "source.txt"
+        if not root.is_dir() or not metadata_path.exists() or not source_path.exists():
+            continue
+
+        project_id = root.name
+        metadata = read_json(metadata_path)
+        text = source_path.read_text(encoding="utf-8")
+        created_at = metadata.get("createdAt") or datetime.now(timezone.utc).isoformat()
+        updated_at = created_at
+        status = "created"
+        if (root / "timeline.json").exists():
+            status = "timeline_saved"
+        if (root / "analysis.json").exists():
+            status = "analyzed"
+        if (root / "song.mp3").exists():
+            status = "song_uploaded"
+
+        with transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO projects(id, title, created_at, updated_at, status, text_length, source_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (project_id, derive_title(text), created_at, updated_at, status, len(text), str(source_path)),
+            )
+            register_asset(conn, project_id, "source_text", source_path, created_at)
+            if (root / "analysis.json").exists():
+                register_asset(conn, project_id, "analysis_json", root / "analysis.json", created_at)
+            if (root / "timeline.json").exists():
+                register_asset(conn, project_id, "timeline_json", root / "timeline.json", created_at)
+            if (root / "song.mp3").exists():
+                register_asset(conn, project_id, "song_mp3", root / "song.mp3", created_at)
 
 
 def save_analysis(project_id: str, analysis: dict) -> None:

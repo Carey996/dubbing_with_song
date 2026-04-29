@@ -11,6 +11,7 @@ from ..services.chapter_service import split_text_into_chapters
 from ..services.project_store import (
     create_project,
     get_project,
+    list_projects,
     save_analysis,
     save_song_file,
     save_timeline,
@@ -23,6 +24,11 @@ router = APIRouter(tags=["projects"])
 
 class CreateProjectRequest(BaseModel):
     text: str
+
+
+@router.get("/projects")
+def list_projects_endpoint() -> dict:
+    return {"projects": list_projects()}
 
 
 @router.post("/projects")

@@ -46,6 +46,31 @@ def test_database_schema_version_is_initialized():
     assert value == "1"
 
 
+def test_projects_endpoint_lists_persisted_projects():
+    created = client.post("/api/projects", json={"text": "历史项目内容。"})
+
+    response = client.get("/api/projects")
+
+    assert response.status_code == 200
+    assert any(item["id"] == created.json()["id"] for item in response.json()["projects"])
+
+
+def test_existing_project_folder_is_imported():
+    project_id = "legacyabc123"
+    root = project_store.PROJECTS_DIR / project_id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "source.txt").write_text("旧项目正文。", encoding="utf-8")
+    project_store.write_json(root / "metadata.json", {"id": project_id, "createdAt": "2026-04-29T00:00:00+00:00"})
+
+    project_store.import_existing_projects()
+    response = client.get(f"/api/projects/{project_id}")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == project_id
+    assert response.json()["title"] == "旧项目正文。"
+    assert response.json()["text"] == "旧项目正文。"
+
+
 def fake_analysis(text: str) -> dict:
     if "小星星" in text:
         segments = [
