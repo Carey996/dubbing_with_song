@@ -489,6 +489,91 @@ def test_chapter_analyze_endpoint_uses_selected_chapter(monkeypatch):
     assert captured["chapters"][0].id == "chap-002"
 
 
+def test_chapter_lyric_upload_rejects_plain_txt():
+    created = client.post("/api/projects", json={"text": "第一章 唱歌\n《小星星》\n一闪一闪亮晶晶"})
+
+    response = client.post(
+        f"/api/projects/{created.json()['id']}/chapters/chap-001/lyric-file",
+        files={"file": ("lyrics.txt", b"plain lyric text", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert ".lrc" in response.json()["detail"]
+
+
+def test_chapter_lrc_upload_enriches_chapter_analysis_with_default_cues(monkeypatch):
+    def fake_chapter_analysis(text: str, chapters=None):
+        return fake_analysis(text)
+
+    monkeypatch.setattr(projects, "analyze_text", fake_chapter_analysis)
+    created = client.post("/api/projects", json={"text": "第一章 唱歌\n《小星星》\n一闪一闪亮晶晶"})
+    project_id = created.json()["id"]
+    lrc = "[00:12.50]一闪一闪亮晶晶\n[00:16.00]满天都是小星星\n"
+
+    uploaded = client.post(
+        f"/api/projects/{project_id}/chapters/chap-001/lyric-file",
+        files={"file": ("twinkle.lrc", lrc.encode("utf-8"), "application/octet-stream")},
+    )
+    analyzed = client.post(f"/api/projects/{project_id}/chapters/chap-001/analyze")
+
+    segment = analyzed.json()["segments"][0]
+    assert uploaded.status_code == 200
+    assert uploaded.json()["filename"] == "twinkle.lrc"
+    assert segment["type"] == "lyric"
+    assert segment["songClipStartSec"] == 12.5
+    assert segment["songClipEndSec"] == 16.0
+    assert segment["lyricMatch"]["line"] == "一闪一闪亮晶晶"
+    assert segment["lyricMatch"]["source"] == "chapter-lrc"
+
+
+def test_render_uses_chapter_song_when_project_song_is_missing(monkeypatch):
+    created = client.post("/api/projects", json={"text": "第一章 唱歌\n一闪一闪亮晶晶"})
+    project_id = created.json()["id"]
+    client.post(
+        f"/api/projects/{project_id}/chapters/chap-001/song-file",
+        files={"file": ("chapter-song.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00", "audio/mpeg")},
+    )
+    timeline = {
+        "bgmVolume": 0.5,
+        "narrationVolume": 1,
+        "songStartSec": 0,
+        "segments": [
+            {
+                "id": "seg-001",
+                "index": 0,
+                "chapterId": "chap-001",
+                "chapterTitle": "第一章 唱歌",
+                "type": "lyric",
+                "text": "一闪一闪亮晶晶",
+                "startSec": 0,
+                "durationSec": 3.5,
+                "confidence": 0.9,
+                "reason": "测试歌词",
+                "songClipStartSec": 12.5,
+                "songClipEndSec": 16,
+            }
+        ],
+    }
+    client.patch(f"/api/projects/{project_id}/timeline", json=timeline)
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        Path(command[-1]).write_bytes(b"fake mp3 output")
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(renderer, "find_ffmpeg", lambda: "ffmpeg.exe")
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+
+    response = client.post(f"/api/projects/{project_id}/render")
+
+    assert response.status_code == 200
+    command = captured["command"]
+    assert any("chapters" in item and "chap-001" in item and item.endswith("song.mp3") for item in command)
+    assert not any(item.endswith("projects\\" + project_id + "\\song.mp3") for item in command)
+
+
 def test_plain_narration_flow(monkeypatch):
     monkeypatch.setattr(projects, "analyze_text", fake_analysis)
     created = client.post("/api/projects", json={"text": "这是一个普通旁白。这里继续讲故事。"})

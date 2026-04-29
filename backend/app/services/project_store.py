@@ -38,6 +38,15 @@ class Project:
     def song_path(self) -> Path:
         return self.root / "song.mp3"
 
+    def chapter_root(self, chapter_id: str) -> Path:
+        return self.root / "chapters" / chapter_id
+
+    def chapter_song_path(self, chapter_id: str) -> Path:
+        return self.chapter_root(chapter_id) / "song.mp3"
+
+    def chapter_lrc_path(self, chapter_id: str) -> Path:
+        return self.chapter_root(chapter_id) / "lyrics.lrc"
+
     @property
     def output_dir(self) -> Path:
         render_id = self.metadata.get("renderId")
@@ -225,6 +234,46 @@ def save_song_file(project_id: str, filename: str, content: bytes) -> dict:
     return song
 
 
+def save_chapter_song_file(project_id: str, chapter_id: str, filename: str, content: bytes) -> dict:
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded chapter MP3 is empty.")
+
+    project = get_project(project_id)
+    path = project.chapter_song_path(chapter_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    song = {
+        "chapterId": chapter_id,
+        "filename": filename,
+        "size": len(content),
+        "url": f"/api/projects/{project_id}/chapters/{chapter_id}/song-file",
+    }
+    write_json(project.chapter_root(chapter_id) / "song.json", song)
+    now = datetime.now(timezone.utc).isoformat()
+    project_repository.mark_asset_uploaded(project_id, "chapter_song_mp3", path, now, song)
+    return song
+
+
+def save_chapter_lrc_file(project_id: str, chapter_id: str, filename: str, content: bytes) -> dict:
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded LRC is empty.")
+
+    project = get_project(project_id)
+    path = project.chapter_lrc_path(chapter_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    lyric = {
+        "chapterId": chapter_id,
+        "filename": filename,
+        "size": len(content),
+        "url": f"/api/projects/{project_id}/chapters/{chapter_id}/lyric-file",
+    }
+    write_json(project.chapter_root(chapter_id) / "lyrics.json", lyric)
+    now = datetime.now(timezone.utc).isoformat()
+    project_repository.mark_asset_uploaded(project_id, "chapter_lrc", path, now, lyric)
+    return lyric
+
+
 def save_timeline(project_id: str, payload: dict) -> dict:
     project = get_project(project_id)
     timeline = {
@@ -300,6 +349,9 @@ def normalize_segments(segments: list[dict]) -> list[dict]:
                 "reason": str(segment.get("reason") or ""),
                 "songClipStartSec": max(0.0, float(segment.get("songClipStartSec", 0.0) or 0.0)),
                 "songClipEndSec": max(0.0, float(segment.get("songClipEndSec", duration) or duration)),
+                **({"chapterId": str(segment.get("chapterId"))} if segment.get("chapterId") else {}),
+                **({"chapterTitle": str(segment.get("chapterTitle"))} if segment.get("chapterTitle") else {}),
+                **({"lyricMatch": segment.get("lyricMatch")} if isinstance(segment.get("lyricMatch"), dict) else {}),
             }
         )
         cursor += duration

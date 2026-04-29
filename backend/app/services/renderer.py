@@ -27,23 +27,25 @@ BUNDLED_FFMPEG_PATH = BASE_DIR / "tools" / "ffmpeg" / "windows-x64" / "ffmpeg.ex
 def render_project(project: Project) -> dict:
     timeline = read_timeline(project)
     has_song = project.song_path.exists()
-    if has_lyric_segments(timeline) and not has_song:
-        raise HTTPException(
-            status_code=400,
-            detail="歌词片段需要先上传 MP3，再选择歌曲片段开始/结束卡点；后端不会把歌词文本发送给 AI TTS 合成。",
-        )
+    has_lyrics = has_lyric_segments(timeline)
+    lyric_song_paths = resolve_lyric_segment_song_paths(project, timeline) if has_lyrics else {}
+    has_mix_source = has_song or bool(lyric_song_paths)
 
     render_dir = project.output_dir
     chunks_dir = render_dir / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     narration_path = render_dir / "narration.wav"
-    build_narration_track(timeline, chunks_dir, narration_path, include_lyrics=not has_song)
+    build_narration_track(timeline, chunks_dir, narration_path, include_lyrics=not has_lyrics)
 
     ffmpeg = find_ffmpeg()
-    if has_song and ffmpeg:
+    if has_lyrics and not ffmpeg:
+        raise HTTPException(status_code=503, detail="歌词片段需要 ffmpeg 才能从 MP3 裁切混音。")
+
+    if has_mix_source and ffmpeg:
         output_path = render_dir / "mixed.mp3"
-        mix_with_song(ffmpeg, narration_path, project.song_path, output_path, timeline)
+        default_song_path = project.song_path if has_song else next(iter(lyric_song_paths.values()))
+        mix_with_song(ffmpeg, narration_path, default_song_path, output_path, timeline, lyric_song_paths=lyric_song_paths)
         return {
             "status": "mixed",
             "message": "已生成旁白 + MP3 BGM 混音。",
@@ -52,7 +54,7 @@ def render_project(project: Project) -> dict:
         }
 
     warnings = []
-    if has_song and not ffmpeg:
+    if has_mix_source and not ffmpeg:
         warnings.append("未检测到 ffmpeg，后端无法混入 MP3，已导出旁白 WAV。")
     return {
         "status": "narration-only",
@@ -93,6 +95,31 @@ def build_narration_track(timeline: dict, chunks_dir: Path, output_path: Path, i
 
 def has_lyric_segments(timeline: dict) -> bool:
     return any(segment.get("type") == "lyric" for segment in timeline.get("segments") or [])
+
+
+def resolve_lyric_segment_song_paths(project: Project, timeline: dict) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    missing_segments = []
+    for segment in timeline.get("segments") or []:
+        if segment.get("type") != "lyric":
+            continue
+        segment_id = str(segment.get("id") or "")
+        chapter_id = str(segment.get("chapterId") or "")
+        chapter_song = project.chapter_song_path(chapter_id) if chapter_id else None
+        if chapter_song and chapter_song.exists():
+            paths[segment_id] = chapter_song
+            continue
+        if project.song_path.exists():
+            paths[segment_id] = project.song_path
+            continue
+        missing_segments.append(segment_id or str(segment.get("index", "?")))
+
+    if missing_segments:
+        raise HTTPException(
+            status_code=400,
+            detail="歌词片段需要先上传章节 MP3 或项目 MP3，再选择歌曲片段开始/结束卡点；后端不会把歌词文本发送给 AI TTS 合成。",
+        )
+    return paths
 
 
 def synthesize_wav(text: str, output_path: Path) -> None:
@@ -319,13 +346,25 @@ def concatenate_wavs(paths: list[Path], output_path: Path) -> None:
                 output.writeframes(wav.readframes(wav.getnframes()))
 
 
-def mix_with_song(ffmpeg: str, narration_path: Path, song_path: Path, output_path: Path, timeline: dict) -> None:
+def mix_with_song(
+    ffmpeg: str,
+    narration_path: Path,
+    song_path: Path,
+    output_path: Path,
+    timeline: dict,
+    lyric_song_paths: dict[str, Path] | None = None,
+) -> None:
     duration = get_wav_duration(narration_path)
     bgm_volume = float(timeline.get("bgmVolume", 0.22) or 0.22)
-    lyric_clips = build_lyric_clip_specs(timeline)
+    lyric_clips = build_lyric_clip_specs(timeline, song_path, lyric_song_paths or {})
     if lyric_clips:
+        song_paths = unique_clip_song_paths(lyric_clips)
+        song_input_indexes = {str(path): index + 1 for index, path in enumerate(song_paths)}
+        for clip in lyric_clips:
+            clip["songInputIndex"] = song_input_indexes[str(clip["songPath"])]
         filter_graph = build_lyric_clip_filter_graph(lyric_clips, bgm_volume)
         song_input_options = []
+        song_inputs = [str(path) for path in song_paths]
     else:
         song_start = float(timeline.get("songStartSec", 0.0) or 0.0)
         filter_graph = (
@@ -333,6 +372,7 @@ def mix_with_song(ffmpeg: str, narration_path: Path, song_path: Path, output_pat
             "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[out]"
         )
         song_input_options = ["-stream_loop", "-1", "-ss", f"{song_start:.3f}"]
+        song_inputs = [str(song_path)]
 
     command = [
         ffmpeg,
@@ -340,8 +380,7 @@ def mix_with_song(ffmpeg: str, narration_path: Path, song_path: Path, output_pat
         "-i",
         str(narration_path),
         *song_input_options,
-        "-i",
-        str(song_path),
+        *sum((["-i", item] for item in song_inputs), []),
         "-filter_complex",
         filter_graph,
         "-map",
@@ -357,12 +396,13 @@ def mix_with_song(ffmpeg: str, narration_path: Path, song_path: Path, output_pat
         raise HTTPException(status_code=500, detail=f"ffmpeg render failed: {result.stderr[-800:]}")
 
 
-def build_lyric_clip_specs(timeline: dict) -> list[dict]:
+def build_lyric_clip_specs(timeline: dict, default_song_path: Path, lyric_song_paths: dict[str, Path]) -> list[dict]:
     specs = []
     for segment in timeline.get("segments") or []:
         if segment.get("type") != "lyric":
             continue
 
+        segment_id = str(segment.get("id") or "")
         start_sec = max(0.0, float(segment.get("startSec", 0.0) or 0.0))
         duration_sec = max(0.1, float(segment.get("durationSec", 0.1) or 0.1))
         clip_start_sec = max(0.0, float(segment.get("songClipStartSec", 0.0) or 0.0))
@@ -373,22 +413,44 @@ def build_lyric_clip_specs(timeline: dict) -> list[dict]:
                 "timelineStartSec": start_sec,
                 "clipStartSec": clip_start_sec,
                 "durationSec": min(duration_sec, max(0.1, clip_duration_sec)),
+                "songPath": lyric_song_paths.get(segment_id, default_song_path),
             }
         )
     return specs
 
 
+def unique_clip_song_paths(clips: list[dict]) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for clip in clips:
+        path = clip["songPath"]
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
 def build_lyric_clip_filter_graph(clips: list[dict], bgm_volume: float) -> str:
     filters = []
     clip_inputs = []
-    if len(clips) == 1:
-        source_labels = ["[1:a]"]
-    else:
-        split_outputs = "".join(f"[song{i}]" for i in range(len(clips)))
-        filters.append(f"[1:a]asplit={len(clips)}{split_outputs}")
-        source_labels = [f"[song{i}]" for i in range(len(clips))]
+    source_labels: dict[int, str] = {}
+    clips_by_input: dict[int, list[int]] = {}
+    for index, clip in enumerate(clips):
+        clips_by_input.setdefault(int(clip.get("songInputIndex", 1)), []).append(index)
 
-    for index, (clip, source_label) in enumerate(zip(clips, source_labels)):
+    for input_index, clip_indexes in clips_by_input.items():
+        if len(clip_indexes) == 1:
+            source_labels[clip_indexes[0]] = f"[{input_index}:a]"
+            continue
+        split_outputs = "".join(f"[song{clip_index}]" for clip_index in clip_indexes)
+        filters.append(f"[{input_index}:a]asplit={len(clip_indexes)}{split_outputs}")
+        for clip_index in clip_indexes:
+            source_labels[clip_index] = f"[song{clip_index}]"
+
+    for index, clip in enumerate(clips):
+        source_label = source_labels[index]
         output_label = f"[clip{index}]"
         delay_ms = int(round(clip["timelineStartSec"] * 1000))
         filters.append(

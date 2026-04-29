@@ -184,6 +184,12 @@ def mark_song_uploaded(project_id: str, song_path: Path, updated_at: str, metada
         conn.execute(read_sql("update_project_song.sql"), {"updated_at": updated_at, "project_id": project_id})
 
 
+def mark_asset_uploaded(project_id: str, asset_type: str, asset_path: Path, updated_at: str, metadata: dict) -> None:
+    initialize_database()
+    with transaction() as conn:
+        register_asset(conn, project_id, asset_type, asset_path, updated_at, metadata)
+
+
 def mark_timeline_saved(project_id: str, timeline_path: Path, updated_at: str) -> None:
     initialize_database()
     with transaction() as conn:

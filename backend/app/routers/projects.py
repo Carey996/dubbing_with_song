@@ -9,6 +9,7 @@ from starlette.datastructures import UploadFile
 
 from ..services.analyzer import analyze_text
 from ..services.chapter_service import split_text_into_chapters
+from ..services.lrc import enrich_analysis_with_lrc, parse_lrc
 from ..services.project_store import (
     complete_render_record,
     create_project,
@@ -19,6 +20,8 @@ from ..services.project_store import (
     list_analyses,
     list_projects,
     list_renders,
+    save_chapter_lrc_file,
+    save_chapter_song_file,
     save_analysis,
     save_song_file,
     save_timeline,
@@ -77,6 +80,9 @@ def analyze_project_chapter_endpoint(project_id: str, chapter_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Chapter not found.")
 
     analysis = analyze_text(chapter.text, chapters=[chapter])
+    if project.chapter_lrc_path(chapter.id).exists():
+        lrc_lines = parse_lrc(project.chapter_lrc_path(chapter.id).read_text(encoding="utf-8"))
+        analysis = enrich_analysis_with_lrc(analysis, lrc_lines)
     return save_analysis(project_id, analysis, scope="chapter", chapter_id=chapter.id, chapter_title=chapter.title)
 
 
@@ -91,7 +97,7 @@ def list_project_chapters_endpoint(project_id: str) -> dict:
     chapters = split_text_into_chapters(project.text)
     return {
         "projectId": project.id,
-        "chapters": [chapter.public_dict(include_text=True) for chapter in chapters],
+        "chapters": [chapter_with_assets(project, chapter) for chapter in chapters],
     }
 
 
@@ -118,6 +124,62 @@ def get_song_endpoint(project_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Song file not found.")
 
     return FileResponse(project.song_path, media_type="audio/mpeg", filename="song.mp3")
+
+
+@router.post("/projects/{project_id}/chapters/{chapter_id}/song-file")
+async def upload_chapter_song_endpoint(project_id: str, chapter_id: str, request: Request) -> dict:
+    project = get_project(project_id)
+    require_chapter(project, chapter_id)
+    form = await request.form()
+    upload = form.get("file")
+    if not isinstance(upload, UploadFile):
+        raise HTTPException(status_code=400, detail="Missing MP3 file field named 'file'.")
+
+    filename = Path(upload.filename or "song.mp3").name
+    if not filename.lower().endswith(".mp3"):
+        raise HTTPException(status_code=400, detail="Only .mp3 files are supported for chapter songs.")
+
+    return save_chapter_song_file(project.id, chapter_id, filename, await upload.read())
+
+
+@router.get("/projects/{project_id}/chapters/{chapter_id}/song-file")
+def get_chapter_song_endpoint(project_id: str, chapter_id: str) -> FileResponse:
+    project = get_project(project_id)
+    require_chapter(project, chapter_id)
+    path = project.chapter_song_path(chapter_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Chapter song file not found.")
+
+    return FileResponse(path, media_type="audio/mpeg", filename="song.mp3")
+
+
+@router.post("/projects/{project_id}/chapters/{chapter_id}/lyric-file")
+async def upload_chapter_lyric_endpoint(project_id: str, chapter_id: str, request: Request) -> dict:
+    project = get_project(project_id)
+    require_chapter(project, chapter_id)
+    form = await request.form()
+    upload = form.get("file")
+    if not isinstance(upload, UploadFile):
+        raise HTTPException(status_code=400, detail="Missing LRC file field named 'file'.")
+
+    filename = Path(upload.filename or "lyrics.lrc").name
+    if not filename.lower().endswith(".lrc"):
+        raise HTTPException(status_code=400, detail="Only .lrc lyric files are supported.")
+
+    content = await upload.read()
+    parse_lrc(content.decode("utf-8-sig"))
+    return save_chapter_lrc_file(project.id, chapter_id, filename, content)
+
+
+@router.get("/projects/{project_id}/chapters/{chapter_id}/lyric-file")
+def get_chapter_lyric_endpoint(project_id: str, chapter_id: str) -> FileResponse:
+    project = get_project(project_id)
+    require_chapter(project, chapter_id)
+    path = project.chapter_lrc_path(chapter_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Chapter LRC file not found.")
+
+    return FileResponse(path, media_type="text/plain; charset=utf-8", filename="lyrics.lrc")
 
 
 @router.patch("/projects/{project_id}/timeline")
@@ -152,3 +214,28 @@ def list_project_renders_endpoint(project_id: str) -> dict:
 @router.get("/projects/{project_id}")
 def get_project_endpoint(project_id: str) -> dict:
     return get_project(project_id).public_dict(include_text=True)
+
+
+def require_chapter(project, chapter_id: str):
+    chapters = split_text_into_chapters(project.text)
+    chapter = next((item for item in chapters if item.id == chapter_id), None)
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found.")
+    return chapter
+
+
+def chapter_with_assets(project, chapter) -> dict:
+    payload = chapter.public_dict(include_text=True)
+    song_path = project.chapter_song_path(chapter.id)
+    lrc_path = project.chapter_lrc_path(chapter.id)
+    payload["chapterSong"] = {
+        "chapterId": chapter.id,
+        "filename": "song.mp3",
+        "url": f"/api/projects/{project.id}/chapters/{chapter.id}/song-file",
+    } if song_path.exists() else None
+    payload["chapterLyric"] = {
+        "chapterId": chapter.id,
+        "filename": "lyrics.lrc",
+        "url": f"/api/projects/{project.id}/chapters/{chapter.id}/lyric-file",
+    } if lrc_path.exists() else None
+    return payload

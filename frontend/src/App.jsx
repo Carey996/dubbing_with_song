@@ -28,6 +28,8 @@ function App() {
   const [text, setText] = useState('');
   const [txtFile, setTxtFile] = useState(null);
   const [songFile, setSongFile] = useState(null);
+  const [chapterSongFile, setChapterSongFile] = useState(null);
+  const [chapterLrcFile, setChapterLrcFile] = useState(null);
   const [project, setProject] = useState(null);
   const [projectList, setProjectList] = useState([]);
   const [view, setView] = useState('workspace');
@@ -57,11 +59,19 @@ function App() {
   const previewChapter = selectedChapter || chapters[0] || null;
   const isAnalyzing = busy === 'analyzing';
   const localSongUrl = useMemo(() => (songFile ? URL.createObjectURL(songFile) : ''), [songFile]);
+  const localChapterSongUrl = useMemo(() => (
+    chapterSongFile ? URL.createObjectURL(chapterSongFile) : ''
+  ), [chapterSongFile]);
   const uploadedSongUrl = useMemo(() => {
     if (!project?.hasSong) return '';
     const version = encodeURIComponent(project.updatedAt || project.id);
     return `/api/projects/${project.id}/song-file?v=${version}`;
   }, [project]);
+  const selectedChapterSongUrl = useMemo(() => {
+    if (!project || !selectedChapter?.chapterSong) return '';
+    const version = encodeURIComponent(project.updatedAt || project.id);
+    return `/api/projects/${project.id}/chapters/${selectedChapter.id}/song-file?v=${version}`;
+  }, [project, selectedChapter]);
   const songAudioUrl = localSongUrl || uploadedSongUrl;
   const analysisPhase = useMemo(() => {
     if (analysisProgress >= 100) return '分析完成，正在刷新结果';
@@ -90,6 +100,12 @@ function App() {
     }
   ), [localSongUrl]);
 
+  useEffect(() => (
+    () => {
+      if (localChapterSongUrl) URL.revokeObjectURL(localChapterSongUrl);
+    }
+  ), [localChapterSongUrl]);
+
   function applyChapters(nextChapters) {
     setChapters(nextChapters);
     setSelectedChapterId((currentId) => (
@@ -102,6 +118,8 @@ function App() {
     setText('');
     setTxtFile(null);
     setSongFile(null);
+    setChapterSongFile(null);
+    setChapterLrcFile(null);
     setAnalysis(null);
     applyChapters([]);
     setTimeline(emptyTimeline);
@@ -122,6 +140,8 @@ function App() {
     setText(data.text || '');
     setTxtFile(null);
     setSongFile(null);
+    setChapterSongFile(null);
+    setChapterLrcFile(null);
     setAnalysis(data.analysis || null);
     setTimeline(data.timeline || emptyTimeline);
     setRenderResult(data.latestRender || null);
@@ -263,6 +283,44 @@ function App() {
     }
   }
 
+  async function uploadChapterSong() {
+    if (!project || !selectedChapter || !chapterSongFile) return;
+    setBusy('chapter-song');
+    setError('');
+    try {
+      const form = new FormData();
+      form.append('file', chapterSongFile);
+      await request(`/api/projects/${project.id}/chapters/${selectedChapter.id}/song-file`, { method: 'POST', body: form });
+      setChapterSongFile(null);
+      await refreshProject(project.id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function uploadChapterLrc() {
+    if (!project || !selectedChapter || !chapterLrcFile) return;
+    if (!chapterLrcFile.name.toLowerCase().endsWith('.lrc')) {
+      setError('歌词文件必须是 .lrc。');
+      return;
+    }
+    setBusy('chapter-lrc');
+    setError('');
+    try {
+      const form = new FormData();
+      form.append('file', chapterLrcFile);
+      await request(`/api/projects/${project.id}/chapters/${selectedChapter.id}/lyric-file`, { method: 'POST', body: form });
+      setChapterLrcFile(null);
+      await refreshProject(project.id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
+
   async function saveTimeline() {
     if (!project) return;
     setBusy('timeline');
@@ -329,6 +387,16 @@ function App() {
       Number(segment.songClipEndSec || 0),
       Number(segment.durationSec || 0),
     );
+  }
+
+  function getSegmentSongAudioUrl(segment) {
+    const segmentChapter = chapters.find((chapter) => chapter.id === segment.chapterId);
+    if (segmentChapter?.id === selectedChapter?.id && localChapterSongUrl) return localChapterSongUrl;
+    if (project && segmentChapter?.chapterSong) {
+      const version = encodeURIComponent(project.updatedAt || project.id);
+      return `/api/projects/${project.id}/chapters/${segmentChapter.id}/song-file?v=${version}`;
+    }
+    return songAudioUrl;
   }
 
   function previewNarration() {
@@ -566,6 +634,50 @@ function App() {
                     <strong>{previewChapter.title}</strong>
                     <span>{previewChapter.textLength} 字</span>
                   </div>
+                  <div className="chapter-assets">
+                    <span>{previewChapter.chapterSong ? '已上传章节 MP3' : '未上传章节 MP3'}</span>
+                    <span>{previewChapter.chapterLyric ? '已上传 LRC' : '未上传 LRC'}</span>
+                  </div>
+                  {selectedChapter && (
+                    <div className="chapter-upload-grid">
+                      <label className="file-picker compact">
+                        <FileAudio size={18} />
+                        <span>{chapterSongFile ? chapterSongFile.name : '选择本章节 MP3'}</span>
+                        <input
+                          type="file"
+                          accept=".mp3,audio/mpeg"
+                          onChange={(event) => setChapterSongFile(event.target.files?.[0] || null)}
+                        />
+                      </label>
+                      <button onClick={uploadChapterSong} disabled={busy || !chapterSongFile}>
+                        <Upload size={18} />
+                        上传 MP3
+                      </button>
+                      <label className="file-picker compact">
+                        <FileText size={18} />
+                        <span>{chapterLrcFile ? chapterLrcFile.name : '选择 LRC'}</span>
+                        <input
+                          type="file"
+                          accept=".lrc"
+                          onChange={(event) => setChapterLrcFile(event.target.files?.[0] || null)}
+                        />
+                      </label>
+                      <button onClick={uploadChapterLrc} disabled={busy || !chapterLrcFile}>
+                        <Upload size={18} />
+                        上传 LRC
+                      </button>
+                    </div>
+                  )}
+                  {(localChapterSongUrl || selectedChapterSongUrl) && (
+                    <audio
+                      className="audio"
+                      src={localChapterSongUrl || selectedChapterSongUrl}
+                      controls
+                      preload="metadata"
+                      onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
+                      onTimeUpdate={(event) => setSongCursorSec(roundSeconds(event.currentTarget.currentTime || 0))}
+                    />
+                  )}
                   <p>{previewChapter.text}</p>
                 </article>
               )}
@@ -610,10 +722,10 @@ function App() {
                         <Upload size={18} />
                         上传
                       </button>
-                      {songAudioUrl && (
+                      {getSegmentSongAudioUrl(segment) && (
                         <audio
                           className="audio"
-                          src={songAudioUrl}
+                          src={getSegmentSongAudioUrl(segment)}
                           controls
                           preload="metadata"
                           onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
@@ -621,6 +733,13 @@ function App() {
                         />
                       )}
                     </div>
+                    {segment.lyricMatch && (
+                      <div className="lyric-match">
+                        <strong>LRC 匹配</strong>
+                        <span>{segment.lyricMatch.line}</span>
+                        <small>{segment.lyricMatch.startSec}s - {segment.lyricMatch.endSec}s · {Math.round(segment.lyricMatch.confidence * 100)}%</small>
+                      </div>
+                    )}
                     <label>
                       歌曲片段开始
                       <div className="cue-input-row">
