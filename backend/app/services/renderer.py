@@ -14,6 +14,11 @@ from .project_store import Project, read_timeline
 BASE_DIR = Path(__file__).resolve().parents[3]
 DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
 DEFAULT_TTS_VOICE = "alloy"
+DEFAULT_TTS_INSTRUCTIONS = (
+    "用自然、有情绪的中文有声书旁白风格朗读。根据句意调整语气、停顿和强弱；"
+    "对白更口语，叙述更沉稳；紧张处略微加快并压低，温柔处放慢并柔和。"
+    "不要读出舞台提示或说明，只朗读正文。"
+)
 DEFAULT_OPENROUTER_TTS_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_TTS_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
 BUNDLED_FFMPEG_PATH = BASE_DIR / "tools" / "ffmpeg" / "windows-x64" / "ffmpeg.exe"
@@ -144,14 +149,19 @@ def synthesize_audio_with_openai_compatible(
     client = OpenAI(**client_kwargs)
     model = get_tts_model(default_model)
     voice = os.getenv("TTS_VOICE", DEFAULT_TTS_VOICE)
+    request_kwargs = {
+        "model": model,
+        "voice": voice,
+        "input": text or " ",
+        "response_format": response_format,
+        "speed": float(os.getenv("TTS_SPEED", "1.0")),
+    }
+    instructions = get_tts_instructions()
+    if instructions:
+        request_kwargs["instructions"] = instructions
+
     try:
-        response = client.audio.speech.create(
-            model=model,
-            voice=voice,
-            input=text or " ",
-            response_format=response_format,
-            speed=float(os.getenv("TTS_SPEED", "1.0")),
-        )
+        response = client.audio.speech.create(**request_kwargs)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         response.write_to_file(output_path)
     except Exception as exc:
@@ -177,6 +187,14 @@ def require_tts_api_key() -> str:
 
 def get_tts_model(default_model: str) -> str:
     return os.getenv("TTS_MODEL", default_model).strip() or default_model
+
+
+def get_tts_instructions() -> str | None:
+    configured = os.getenv("TTS_INSTRUCTIONS")
+    if configured is None:
+        return DEFAULT_TTS_INSTRUCTIONS
+    normalized = configured.strip()
+    return normalized or None
 
 
 def validate_openrouter_tts_request(text: str, model: str) -> None:

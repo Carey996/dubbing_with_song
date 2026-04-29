@@ -34,6 +34,14 @@ TTS_RESPONSE_FORMAT=mp3
 
 OpenRouter 的 TTS 输出使用 MP3，后端会先保存 MP3，再用 `ffmpeg` 转成内部拼接需要的 WAV。当前 LM Studio 的本地 OpenAI-compatible 服务可用于文本模型，但不支持本项目需要的 `/v1/audio/speech` 方式，不能直接作为 TTS 服务。
 
+后端默认会给 speech API 传一段“中文有声书旁白”风格的 `instructions`，让模型按语义调整语气、停顿和强弱，避免旁白过于平。需要换风格时可以在 `.env` 里配置：
+
+```env
+TTS_INSTRUCTIONS=用克制但带紧张感的悬疑旁白朗读，保留自然停顿和情绪起伏。
+```
+
+如果某个 TTS 服务不支持 instructions，或你想让模型只读原文，可以把它设成空白值关闭。
+
 如果正文是中文旁白，不要把 `TTS_MODEL` 配成 `mistralai/voxtral-*`。后端会在中文输入 + Voxtral TTS 组合下直接返回配置错误，避免等到 OpenRouter provider 侧报 `No successful provider responses`。
 
 项目已内置 Windows x64 版 `ffmpeg`，默认路径是 `tools\ffmpeg\windows-x64\ffmpeg.exe`，无需额外安装。需要临时切换时，可以显式配置：

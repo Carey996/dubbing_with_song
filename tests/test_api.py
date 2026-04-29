@@ -337,6 +337,7 @@ def test_synthesize_wav_uses_openai_speech_provider(monkeypatch):
     monkeypatch.setenv("TTS_BASE_URL", "http://127.0.0.1:9999/v1")
     monkeypatch.setenv("TTS_MODEL", "local-tts")
     monkeypatch.setenv("TTS_VOICE", "local-voice")
+    monkeypatch.delenv("TTS_INSTRUCTIONS", raising=False)
     monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
 
     renderer.synthesize_wav("测试旁白", output_path)
@@ -347,6 +348,65 @@ def test_synthesize_wav_uses_openai_speech_provider(monkeypatch):
     assert calls[1]["voice"] == "local-voice"
     assert calls[1]["input"] == "测试旁白"
     assert calls[1]["response_format"] == "wav"
+    assert calls[1]["instructions"] == renderer.DEFAULT_TTS_INSTRUCTIONS
+
+
+def test_synthesize_wav_allows_tts_instruction_override(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    output_path = TEST_TMP_DIR / "speech-style.wav"
+    calls = []
+
+    class FakeSpeech:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return self
+
+        def write_to_file(self, path):
+            Path(path).write_bytes(b"RIFFfakeWAVE")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.append({"client": kwargs})
+            self.audio = type("Audio", (), {"speech": FakeSpeech()})()
+
+    monkeypatch.setenv("TTS_PROVIDER", "openai")
+    monkeypatch.setenv("TTS_API_KEY", "local-key")
+    monkeypatch.setenv("TTS_MODEL", "local-tts")
+    monkeypatch.setenv("TTS_INSTRUCTIONS", "用克制但带紧张感的悬疑旁白朗读。")
+    monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
+
+    renderer.synthesize_wav("门外传来脚步声。", output_path)
+
+    assert calls[1]["instructions"] == "用克制但带紧张感的悬疑旁白朗读。"
+
+
+def test_blank_tts_instructions_disables_instruction_field(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    output_path = TEST_TMP_DIR / "speech-no-style.wav"
+    calls = []
+
+    class FakeSpeech:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return self
+
+        def write_to_file(self, path):
+            Path(path).write_bytes(b"RIFFfakeWAVE")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.append({"client": kwargs})
+            self.audio = type("Audio", (), {"speech": FakeSpeech()})()
+
+    monkeypatch.setenv("TTS_PROVIDER", "openai")
+    monkeypatch.setenv("TTS_API_KEY", "local-key")
+    monkeypatch.setenv("TTS_MODEL", "local-tts")
+    monkeypatch.setenv("TTS_INSTRUCTIONS", "   ")
+    monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
+
+    renderer.synthesize_wav("普通旁白。", output_path)
+
+    assert "instructions" not in calls[1]
 
 
 def test_synthesize_wav_uses_openrouter_mp3_and_ffmpeg(monkeypatch):
