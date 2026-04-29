@@ -429,6 +429,57 @@ def test_openrouter_tts_requires_mp3_response_format(monkeypatch):
     assert "TTS_RESPONSE_FORMAT=mp3" in str(exc.value.detail)
 
 
+def test_openrouter_voxtral_tts_rejects_chinese_text_before_remote_call(monkeypatch):
+    calls = []
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setenv("TTS_PROVIDER", "openrouter")
+    monkeypatch.setenv("TTS_API_KEY", "openrouter-key")
+    monkeypatch.setenv("TTS_MODEL", "mistralai/voxtral-mini-tts-2603")
+    monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
+
+    with pytest.raises(HTTPException) as exc:
+        renderer.synthesize_wav("这是一段中文旁白。", TEST_TMP_DIR / "voxtral-chinese.wav")
+
+    assert exc.value.status_code == 503
+    assert "mistralai/voxtral-mini-tts-2603" in str(exc.value.detail)
+    assert "中文" in str(exc.value.detail)
+    assert calls == []
+
+
+def test_openrouter_provider_404_has_actionable_detail(monkeypatch):
+    class FakeOpenRouterError(Exception):
+        status_code = 404
+
+        def __str__(self):
+            return "Error code: 404 - {'error': {'message': 'No successful provider responses.', 'code': 404}}"
+
+    class FakeSpeech:
+        def create(self, **kwargs):
+            raise FakeOpenRouterError()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.audio = type("Audio", (), {"speech": FakeSpeech()})()
+
+    monkeypatch.setenv("TTS_PROVIDER", "openrouter")
+    monkeypatch.setenv("TTS_API_KEY", "openrouter-key")
+    monkeypatch.setenv("TTS_MODEL", "openai/gpt-4o-mini-tts-2025-12-15")
+    monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
+
+    with pytest.raises(HTTPException) as exc:
+        renderer.synthesize_wav("English narration.", TEST_TMP_DIR / "openrouter-404.wav")
+
+    assert exc.value.status_code == 503
+    detail = str(exc.value.detail)
+    assert "OpenRouter TTS provider returned 404" in detail
+    assert "TTS_MODEL=openai/gpt-4o-mini-tts-2025-12-15" in detail
+    assert "No successful provider responses" in detail
+
+
 def test_synthesize_wav_requires_ai_tts_config(monkeypatch):
     monkeypatch.delenv("TTS_API_KEY", raising=False)
 
