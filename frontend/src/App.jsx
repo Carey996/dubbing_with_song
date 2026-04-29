@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { BookOpen, Download, FileAudio, FileText, Music, Play, Sparkles, Upload } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
+import { advanceAnalysisProgress, completeAnalysisProgress } from './analysisProgress.js';
 import './styles.css';
 
 const emptyTimeline = {
@@ -22,6 +23,9 @@ function App() {
   const [renderResult, setRenderResult] = useState(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [analysisProgress, setAnalysisProgress] = useState(0);
+  const [analysisProgressVisible, setAnalysisProgressVisible] = useState(false);
+  const [analysisTargetLabel, setAnalysisTargetLabel] = useState('');
 
   const totals = useMemo(() => {
     const duration = timeline.segments.reduce((sum, segment) => sum + Number(segment.durationSec || 0), 0);
@@ -30,9 +34,27 @@ function App() {
   }, [timeline]);
 
   const selectedChapter = useMemo(
-    () => chapters.find((chapter) => chapter.id === selectedChapterId) || chapters[0] || null,
+    () => chapters.find((chapter) => chapter.id === selectedChapterId) || null,
     [chapters, selectedChapterId],
   );
+  const previewChapter = selectedChapter || chapters[0] || null;
+  const isAnalyzing = busy === 'analyzing';
+  const analysisPhase = useMemo(() => {
+    if (analysisProgress >= 100) return '分析完成，正在刷新结果';
+    if (analysisProgress >= 72) return '生成时间轴与歌词候选';
+    if (analysisProgress >= 36) return 'AI 正在解析章节内容';
+    return '准备分析上下文';
+  }, [analysisProgress]);
+
+  useEffect(() => {
+    if (!isAnalyzing) return undefined;
+
+    const timer = window.setInterval(() => {
+      setAnalysisProgress((current) => advanceAnalysisProgress(current));
+    }, 700);
+
+    return () => window.clearInterval(timer);
+  }, [isAnalyzing]);
 
   function applyChapters(nextChapters) {
     setChapters(nextChapters);
@@ -72,20 +94,33 @@ function App() {
 
   async function analyzeProject() {
     if (!project) return;
+    const chapterForAnalysis = selectedChapter;
     setBusy('analyzing');
     setError('');
+    setAnalysisTargetLabel(chapterForAnalysis ? chapterForAnalysis.title : '全篇文本');
+    setAnalysisProgress(4);
+    setAnalysisProgressVisible(true);
+    let completed = false;
     try {
-      const url = selectedChapter
-        ? `/api/projects/${project.id}/chapters/${selectedChapter.id}/analyze`
+      const url = chapterForAnalysis
+        ? `/api/projects/${project.id}/chapters/${chapterForAnalysis.id}/analyze`
         : `/api/projects/${project.id}/analyze`;
       const data = await request(url, { method: 'POST' });
       setAnalysis(data);
       applyChapters(data.chapters || chapters);
       setTimeline(data.timeline);
+      setAnalysisProgress(completeAnalysisProgress());
+      completed = true;
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy('');
+      if (completed) {
+        window.setTimeout(() => setAnalysisProgressVisible(false), 600);
+      } else {
+        setAnalysisProgressVisible(false);
+        setAnalysisProgress(0);
+      }
     }
   }
 
@@ -202,9 +237,21 @@ function App() {
             创建项目
           </button>
           <button onClick={analyzeProject} disabled={busy || !project}>
-            <Sparkles size={18} />
-            {selectedChapter ? '分析当前章节' : 'AI 分析'}
+            {isAnalyzing ? <span className="spinner" aria-hidden="true" /> : <Sparkles size={18} />}
+            {isAnalyzing ? '分析中' : selectedChapter ? '分析当前章节' : 'AI 分析'}
           </button>
+          {analysisProgressVisible && (
+            <div className="analysis-progress" role="status" aria-live="polite">
+              <div className="analysis-progress-head">
+                <strong>{analysisTargetLabel}</strong>
+                <span>{Math.round(analysisProgress)}%</span>
+              </div>
+              <div className="progress-track" aria-hidden="true">
+                <div className="progress-fill" style={{ width: `${analysisProgress}%` }} />
+              </div>
+              <small>{analysisPhase}</small>
+            </div>
+          )}
           <button onClick={() => loadChapters()} disabled={busy || !project}>
             <FileText size={18} />
             章节预览
@@ -309,13 +356,13 @@ function App() {
                   </button>
                 ))}
               </div>
-              {selectedChapter && (
+              {previewChapter && (
                 <article className="chapter-detail">
                   <div>
-                    <strong>{selectedChapter.title}</strong>
-                    <span>{selectedChapter.textLength} 字</span>
+                    <strong>{previewChapter.title}</strong>
+                    <span>{previewChapter.textLength} 字</span>
                   </div>
-                  <p>{selectedChapter.text}</p>
+                  <p>{previewChapter.text}</p>
                 </article>
               )}
             </div>

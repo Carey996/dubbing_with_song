@@ -44,6 +44,21 @@ button.primary {
   border-color: #176b87;
 }
 
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #c9d2dc;
+  border-top-color: #176b87;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .app-shell {
   min-height: 100vh;
 }
@@ -156,6 +171,49 @@ textarea {
 
 .audio {
   width: 100%;
+}
+
+.analysis-progress {
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.analysis-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.analysis-progress-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-progress-head span,
+.analysis-progress small {
+  color: #5b6f7f;
+  font-size: 12px;
+}
+
+.progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: #e8eef3;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #176b87;
+  transition: width 240ms ease;
 }
 
 .toolbar,
