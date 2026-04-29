@@ -119,12 +119,49 @@ def test_llm_prompt_keeps_audience_chants_as_narration():
     assert "必须标为 narration" in rendered
 
 
+def test_llm_prompt_limits_segments_per_chunk():
+    prompt = analyzer.build_prompt(ChatPromptTemplate, analyzer.get_format_instructions())
+    rendered = prompt.format(text="第一句。第二句。第三句。")
+
+    assert "每个分块最多输出 12 个 segments" in rendered
+    assert "连续 narration 尽量合并" in rendered
+
+
 def test_parse_llm_analysis_drops_empty_segment_objects():
     content = '{"segments":[{"type":"narration","text":"正文。"},{}],"songCandidates":[]}'
     parsed = analyzer.parse_llm_analysis(content)
 
     assert len(parsed.segments) == 1
     assert parsed.segments[0].text == "正文。"
+
+
+def test_parse_llm_analysis_accepts_missing_segment_comma():
+    content = """
+    {
+      "segments": [
+        {"type": "narration", "text": "第一段。"}
+        {"type": "lyric", "text": "一闪一闪亮晶晶", "confidence": 0.8}
+      ],
+      "songCandidates": []
+    }
+    """
+    parsed = analyzer.parse_llm_analysis(content)
+
+    assert [segment.text for segment in parsed.segments] == ["第一段。", "一闪一闪亮晶晶"]
+    assert parsed.segments[1].type == "lyric"
+
+
+def test_parse_llm_analysis_salvages_complete_segments_from_truncated_tail():
+    content = """
+    {
+      "segments": [
+        {"type": "narration", "text": "完整段落。"},
+        {"type": "narration", "text": "没写完的段落"
+    """
+    parsed = analyzer.parse_llm_analysis(content)
+
+    assert len(parsed.segments) == 1
+    assert parsed.segments[0].text == "完整段落。"
 
 
 def test_split_text_into_chapters_detects_common_headings():
@@ -254,13 +291,27 @@ def test_song_upload_accepts_mp3_file():
     assert uploaded.json()["filename"] == "demo.mp3"
 
 
-def test_find_ffmpeg_prefers_configured_path(monkeypatch):
+def test_find_ffmpeg_prefers_bundled_path(monkeypatch):
     TEST_TMP_DIR.mkdir(exist_ok=True)
-    ffmpeg_path = TEST_TMP_DIR / "ffmpeg.exe"
-    ffmpeg_path.write_text("fake ffmpeg", encoding="utf-8")
-    monkeypatch.setenv("FFMPEG_PATH", str(ffmpeg_path))
+    bundled_path = TEST_TMP_DIR / "bundled-ffmpeg.exe"
+    bundled_path.write_text("fake bundled ffmpeg", encoding="utf-8")
+    monkeypatch.delenv("FFMPEG_PATH", raising=False)
+    monkeypatch.setattr(renderer, "BUNDLED_FFMPEG_PATH", bundled_path)
+    monkeypatch.setattr(renderer.shutil, "which", lambda executable: None)
 
-    assert renderer.find_ffmpeg() == str(ffmpeg_path)
+    assert renderer.find_ffmpeg() == str(bundled_path)
+
+
+def test_find_ffmpeg_allows_configured_override(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    bundled_path = TEST_TMP_DIR / "bundled-ffmpeg.exe"
+    configured_path = TEST_TMP_DIR / "configured-ffmpeg.exe"
+    bundled_path.write_text("fake bundled ffmpeg", encoding="utf-8")
+    configured_path.write_text("fake configured ffmpeg", encoding="utf-8")
+    monkeypatch.setattr(renderer, "BUNDLED_FFMPEG_PATH", bundled_path)
+    monkeypatch.setenv("FFMPEG_PATH", str(configured_path))
+
+    assert renderer.find_ffmpeg() == str(configured_path)
 
 
 def test_synthesize_wav_uses_openai_speech_provider(monkeypatch):
@@ -296,6 +347,86 @@ def test_synthesize_wav_uses_openai_speech_provider(monkeypatch):
     assert calls[1]["voice"] == "local-voice"
     assert calls[1]["input"] == "测试旁白"
     assert calls[1]["response_format"] == "wav"
+
+
+def test_synthesize_wav_uses_openrouter_mp3_and_ffmpeg(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    output_path = TEST_TMP_DIR / "openrouter.wav"
+    calls = []
+
+    class FakeSpeech:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return self
+
+        def write_to_file(self, path):
+            Path(path).write_bytes(b"fake mp3")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.append({"client": kwargs})
+            self.audio = type("Audio", (), {"speech": FakeSpeech()})()
+
+    def fake_convert(ffmpeg, input_path, converted_path):
+        calls.append({"convert": (ffmpeg, input_path.name, converted_path.name)})
+        converted_path.write_bytes(b"RIFFfakeWAVE")
+
+    monkeypatch.setenv("TTS_PROVIDER", "openrouter")
+    monkeypatch.setenv("TTS_API_KEY", "openrouter-key")
+    monkeypatch.delenv("TTS_BASE_URL", raising=False)
+    monkeypatch.delenv("TTS_MODEL", raising=False)
+    monkeypatch.delenv("TTS_RESPONSE_FORMAT", raising=False)
+    monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(renderer, "find_ffmpeg", lambda: "ffmpeg.exe")
+    monkeypatch.setattr(renderer, "convert_audio_to_wav", fake_convert)
+
+    renderer.synthesize_wav("测试旁白", output_path)
+
+    assert output_path.read_bytes() == b"RIFFfakeWAVE"
+    assert calls[0]["client"] == {"api_key": "openrouter-key", "base_url": "https://openrouter.ai/api/v1"}
+    assert calls[1]["model"] == "openai/gpt-4o-mini-tts-2025-12-15"
+    assert calls[1]["voice"] == "alloy"
+    assert calls[1]["response_format"] == "mp3"
+    assert calls[2]["convert"] == ("ffmpeg.exe", "openrouter.mp3", "openrouter.wav")
+
+
+def test_openrouter_tts_requires_ffmpeg(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    output_path = TEST_TMP_DIR / "openrouter-no-ffmpeg.wav"
+
+    class FakeSpeech:
+        def create(self, **kwargs):
+            return self
+
+        def write_to_file(self, path):
+            Path(path).write_bytes(b"fake mp3")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.audio = type("Audio", (), {"speech": FakeSpeech()})()
+
+    monkeypatch.setenv("TTS_PROVIDER", "openrouter")
+    monkeypatch.setenv("TTS_API_KEY", "openrouter-key")
+    monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(renderer, "find_ffmpeg", lambda: None)
+
+    with pytest.raises(HTTPException) as exc:
+        renderer.synthesize_wav("测试旁白", output_path)
+
+    assert exc.value.status_code == 503
+    assert "ffmpeg" in str(exc.value.detail)
+
+
+def test_openrouter_tts_requires_mp3_response_format(monkeypatch):
+    monkeypatch.setenv("TTS_PROVIDER", "openrouter")
+    monkeypatch.setenv("TTS_API_KEY", "openrouter-key")
+    monkeypatch.setenv("TTS_RESPONSE_FORMAT", "pcm")
+
+    with pytest.raises(HTTPException) as exc:
+        renderer.synthesize_wav("测试旁白", TEST_TMP_DIR / "openrouter-pcm.wav")
+
+    assert exc.value.status_code == 503
+    assert "TTS_RESPONSE_FORMAT=mp3" in str(exc.value.detail)
 
 
 def test_synthesize_wav_requires_ai_tts_config(monkeypatch):

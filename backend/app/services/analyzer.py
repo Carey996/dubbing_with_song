@@ -95,6 +95,7 @@ def build_prompt(chat_prompt_template, format_instructions: str):
                         "只按原文顺序分段，不要改写原文，不要补写正文。",
                         "输入中以“章节：”或“分块：”开头的行只是上下文元信息，不能输出到任何 segment.text。",
                         "把普通叙述、对话、旁白标为 narration。",
+                        "每个分块最多输出 12 个 segments；连续 narration 尽量合并为 2 到 5 句话一段。",
                         "只有真实歌曲歌词、歌名提示、明确在唱歌且可用歌曲片段替换的内容，才能标为 lyric。",
                         "观众喊话、辱骂、口号、弹幕、普通台词、角色对白都必须标为 narration，不能标为 lyric。",
                         "如果能从歌词或书名号推测歌曲，给 songCandidates；不确定时用 待确认歌曲/待确认歌手。",
@@ -144,7 +145,9 @@ def parse_llm_analysis(content: str) -> LlmAnalysis:
     try:
         payload = json.loads(extract_json_object(content))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"LLM returned invalid JSON: {exc}") from exc
+        payload = parse_relaxed_llm_payload(content)
+        if not payload.get("segments"):
+            raise ValueError(f"LLM returned invalid JSON: {exc}") from exc
 
     payload["segments"] = [
         segment
@@ -163,17 +166,101 @@ def parse_llm_analysis(content: str) -> LlmAnalysis:
         raise ValueError(f"LLM JSON did not match expected schema: {exc}") from exc
 
 
+def parse_relaxed_llm_payload(content: str) -> dict:
+    stripped = strip_json_fence(content)
+    return {
+        "segments": parse_named_object_array(stripped, "segments"),
+        "songCandidates": parse_named_object_array(stripped, "songCandidates"),
+    }
+
+
+def parse_named_object_array(content: str, field_name: str) -> list[dict]:
+    match = re.search(rf'"{re.escape(field_name)}"\s*:\s*\[', content)
+    if not match:
+        return []
+
+    array_start = match.end()
+    array_end = find_matching_bracket(content, array_start - 1)
+    array_text = content[array_start:array_end]
+    decoder = json.JSONDecoder()
+    objects: list[dict] = []
+    cursor = 0
+
+    while cursor < len(array_text):
+        object_start = find_next_unquoted_char(array_text, "{", cursor)
+        if object_start == -1:
+            break
+        try:
+            item, cursor = decoder.raw_decode(array_text, object_start)
+        except json.JSONDecodeError:
+            break
+        if isinstance(item, dict):
+            objects.append(item)
+
+    return objects
+
+
+def find_matching_bracket(content: str, open_index: int) -> int:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(open_index, len(content)):
+        char = content[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return index
+    return len(content)
+
+
+def find_next_unquoted_char(content: str, target: str, start: int) -> int:
+    in_string = False
+    escaped = False
+    for index in range(start, len(content)):
+        char = content[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if not in_string and char == target:
+            return index
+    return -1
+
+
 def extract_json_object(content: str) -> str:
-    stripped = content.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
-        stripped = re.sub(r"\s*```$", "", stripped)
+    stripped = strip_json_fence(content)
 
     start = stripped.find("{")
     end = stripped.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise json.JSONDecodeError("No JSON object found", stripped, 0)
     return stripped[start:end + 1]
+
+
+def strip_json_fence(content: str) -> str:
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped
 
 
 def split_text_for_llm(text: str, max_chars: int) -> list[str]:

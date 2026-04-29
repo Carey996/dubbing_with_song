@@ -20,22 +20,24 @@ OPENAI_MODEL=gemma-4-e4b-it@q4_k_m
 
 如果换成 OpenAI 官方服务，把 `OPENAI_BASE_URL` 删除或改成官方兼容地址，并把 `OPENAI_API_KEY` 改成真实 key。文本分析只走 LangChain LLM；没有 `OPENAI_API_KEY` 会直接报配置错误。
 
-TTS 独立走 AI speech API 配置，不再使用 PowerShell/System.Speech 降级：
+TTS 默认走 OpenRouter 的 OpenAI-compatible speech API，不再使用 PowerShell/System.Speech 降级：
 
 ```env
-TTS_API_KEY=你的 TTS API key
-TTS_BASE_URL=
-TTS_MODEL=gpt-4o-mini-tts
+TTS_PROVIDER=openrouter
+TTS_API_KEY=你的 OpenRouter API key
+TTS_BASE_URL=https://openrouter.ai/api/v1
+TTS_MODEL=openai/gpt-4o-mini-tts-2025-12-15
 TTS_VOICE=alloy
 TTS_SPEED=1.0
+TTS_RESPONSE_FORMAT=mp3
 ```
 
-`TTS_BASE_URL` 留空时使用 OpenAI 官方 SDK 默认地址；如果找到本地 OpenAI-compatible TTS 服务，再改成它的 `/v1` 地址。当前 LM Studio 的本地 OpenAI-compatible 服务可用于文本模型，但不支持本项目需要的 `/v1/audio/speech` 方式，不能直接作为 TTS 服务。
+OpenRouter 的 TTS 输出使用 MP3，后端会先保存 MP3，再用 `ffmpeg` 转成内部拼接需要的 WAV。当前 LM Studio 的本地 OpenAI-compatible 服务可用于文本模型，但不支持本项目需要的 `/v1/audio/speech` 方式，不能直接作为 TTS 服务。
 
-如果 `ffmpeg` 不在 PATH，可以显式配置：
+项目已内置 Windows x64 版 `ffmpeg`，默认路径是 `tools\ffmpeg\windows-x64\ffmpeg.exe`，无需额外安装。需要临时切换时，可以显式配置：
 
 ```env
-FFMPEG_PATH=C:\Program Files\Netease\POPO\popo\POPORecorder\ffmpeg.exe
+FFMPEG_PATH=D:\path\to\ffmpeg.exe
 ```
 
 后端：
@@ -82,7 +84,7 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节
 
 `POST /api/projects` 只接受 JSON：`{"text": "..."}`。txt 文件上传独立走 `POST /api/projects/text-file`，后端解码为文本后复用同一个项目创建服务入口。MP3 上传独立走 `POST /api/projects/{id}/song-file` 的 multipart 表单，避免创建接口同时兼容多种输入格式。
 
-后端 TTS 必须配置可用的 AI speech API。没有 `TTS_API_KEY` 或 TTS 服务不可用时，渲染接口会直接返回错误，不再降级生成 PowerShell 语音或静音占位。没有 `ffmpeg` 时无法在后端混入 MP3，但仍会导出旁白 WAV。
+后端 TTS 必须配置可用的 AI speech API。没有 `TTS_API_KEY`、TTS 服务不可用，或 OpenRouter MP3 无法通过内置 `ffmpeg` 转成 WAV 时，渲染接口会直接返回错误，不再降级生成 PowerShell 语音或静音占位。
 
 ## 后续增强
 
