@@ -36,6 +36,7 @@ Append these tests near the top of `tests/test_api.py`, after constants:
 
 ```python
 from backend.app.services import db
+from backend.app.services import project_store
 from backend.app.services.project_store import list_projects
 
 
@@ -315,12 +316,12 @@ def test_projects_endpoint_lists_persisted_projects():
 
 def test_existing_project_folder_is_imported():
     project_id = "legacyabc123"
-    root = projects.PROJECTS_DIR / project_id
+    root = project_store.PROJECTS_DIR / project_id
     root.mkdir(parents=True, exist_ok=True)
     (root / "source.txt").write_text("旧项目正文。", encoding="utf-8")
-    projects.write_json(root / "metadata.json", {"id": project_id, "createdAt": "2026-04-29T00:00:00+00:00"})
+    project_store.write_json(root / "metadata.json", {"id": project_id, "createdAt": "2026-04-29T00:00:00+00:00"})
 
-    projects.import_existing_projects()
+    project_store.import_existing_projects()
     response = client.get(f"/api/projects/{project_id}")
 
     assert response.status_code == 200
