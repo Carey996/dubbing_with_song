@@ -1,5 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Download, FileAudio, FileText, Music, Play, Sparkles, Upload } from 'lucide-react';
+import {
+  ArrowLeft,
+  BookOpen,
+  Download,
+  FileAudio,
+  FileText,
+  FolderOpen,
+  History,
+  Music,
+  Play,
+  Sparkles,
+  Trash2,
+  Upload,
+} from 'lucide-react';
 import { createRoot } from 'react-dom/client';
 import { advanceAnalysisProgress, completeAnalysisProgress } from './analysisProgress.js';
 import './styles.css';
@@ -17,6 +30,7 @@ function App() {
   const [songFile, setSongFile] = useState(null);
   const [project, setProject] = useState(null);
   const [projectList, setProjectList] = useState([]);
+  const [view, setView] = useState('workspace');
   const [analysis, setAnalysis] = useState(null);
   const [chapters, setChapters] = useState([]);
   const [selectedChapterId, setSelectedChapterId] = useState('');
@@ -68,6 +82,17 @@ function App() {
     ));
   }
 
+  function resetCurrentProject() {
+    setProject(null);
+    setText('');
+    setTxtFile(null);
+    setSongFile(null);
+    setAnalysis(null);
+    applyChapters([]);
+    setTimeline(emptyTimeline);
+    setRenderResult(null);
+  }
+
   async function loadProjectList() {
     try {
       const data = await request('/api/projects');
@@ -109,6 +134,28 @@ function App() {
     setError('');
     try {
       await refreshProject(projectId);
+      setView('workspace');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function deleteProject(projectId) {
+    if (!projectId) return;
+    const item = projectList.find((candidate) => candidate.id === projectId);
+    const label = item?.title || projectId;
+    if (!window.confirm(`删除项目「${label}」？此操作会删除项目文件和生成结果。`)) return;
+
+    setBusy(`deleting-${projectId}`);
+    setError('');
+    try {
+      await request(`/api/projects/${projectId}`, { method: 'DELETE' });
+      if (project?.id === projectId) {
+        resetCurrentProject();
+      }
+      await loadProjectList();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -262,16 +309,38 @@ function App() {
           <p className="eyebrow">Local workflow</p>
           <h1>AI 配音与歌曲替换</h1>
         </div>
-        <div className="status-strip">
-          <span>{project ? `项目 ${project.id}` : '未创建项目'}</span>
-          <span>{chapters.length} 章</span>
-          <span>{timeline.segments.length} 段</span>
-          <span>{totals.duration}s</span>
+        <div className="topbar-right">
+          <div className="status-strip">
+            <span>{project ? `项目 ${project.id}` : '未创建项目'}</span>
+            <span>{chapters.length} 章</span>
+            <span>{timeline.segments.length} 段</span>
+            <span>{totals.duration}s</span>
+          </div>
+          <div className="view-switch">
+            <button type="button" className={view === 'workspace' ? 'primary' : ''} onClick={() => setView('workspace')}>
+              <Sparkles size={18} />
+              工作台
+            </button>
+            <button type="button" className={view === 'history' ? 'primary' : ''} onClick={() => setView('history')}>
+              <History size={18} />
+              历史项目
+            </button>
+          </div>
         </div>
       </header>
 
       {error && <div className="notice error">{error}</div>}
 
+      {view === 'history' ? (
+        <HistoryPage
+          busy={busy}
+          currentProjectId={project?.id || ''}
+          projects={projectList}
+          onBack={() => setView('workspace')}
+          onDelete={deleteProject}
+          onOpen={loadProject}
+        />
+      ) : (
       <section className="workspace-grid">
         <aside className="side-panel">
           <PanelTitle icon={<FileText />} title="输入" />
@@ -297,16 +366,27 @@ function App() {
             <div className="project-history">
               <PanelTitle icon={<BookOpen />} title="历史项目" />
               {projectList.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`project-history-item ${project?.id === item.id ? 'active' : ''}`}
-                  onClick={() => loadProject(item.id)}
-                  disabled={busy}
-                >
-                  <span>{item.title || item.id}</span>
-                  <small>{item.status} · {item.textLength} 字</small>
-                </button>
+                <div key={item.id} className={`project-history-row ${project?.id === item.id ? 'active' : ''}`}>
+                  <button
+                    type="button"
+                    className="project-history-item"
+                    onClick={() => loadProject(item.id)}
+                    disabled={busy}
+                  >
+                    <span>{item.title || item.id}</span>
+                    <small>{item.status} · {item.textLength} 字</small>
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button danger"
+                    onClick={() => deleteProject(item.id)}
+                    disabled={busy}
+                    aria-label={`删除 ${item.title || item.id}`}
+                    title="删除项目"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
               ))}
             </div>
           )}
@@ -502,7 +582,63 @@ function App() {
           )}
         </section>
       </section>
+      )}
     </main>
+  );
+}
+
+function HistoryPage({ busy, currentProjectId, projects, onBack, onDelete, onOpen }) {
+  return (
+    <section className="history-page">
+      <div className="history-toolbar">
+        <button type="button" onClick={onBack}>
+          <ArrowLeft size={18} />
+          返回工作台
+        </button>
+        <div>
+          <h2>历史项目</h2>
+          <p>{projects.length} 个项目</p>
+        </div>
+      </div>
+      {projects.length === 0 ? (
+        <div className="empty-state">
+          <History size={28} />
+          <strong>暂无历史项目</strong>
+        </div>
+      ) : (
+        <div className="history-list">
+          {projects.map((item) => (
+            <article key={item.id} className={`history-card ${currentProjectId === item.id ? 'active' : ''}`}>
+              <div className="history-card-main">
+                <strong>{item.title || item.id}</strong>
+                <span>{item.id}</span>
+              </div>
+              <div className="history-meta">
+                <span>{item.status}</span>
+                <span>{item.textLength} 字</span>
+                <span>{formatDateTime(item.updatedAt)}</span>
+              </div>
+              <div className="history-flags">
+                <span className={item.hasAnalysis ? 'ready' : ''}>分析</span>
+                <span className={item.hasSong ? 'ready' : ''}>歌曲</span>
+                <span className={item.hasTimeline ? 'ready' : ''}>时间轴</span>
+                <span className={item.hasRender ? 'ready' : ''}>生成</span>
+              </div>
+              <div className="history-actions">
+                <button type="button" onClick={() => onOpen(item.id)} disabled={busy}>
+                  <FolderOpen size={18} />
+                  打开
+                </button>
+                <button type="button" className="danger" onClick={() => onDelete(item.id)} disabled={busy}>
+                  <Trash2 size={18} />
+                  删除
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -513,6 +649,18 @@ function PanelTitle({ icon, title }) {
       <h2>{title}</h2>
     </div>
   );
+}
+
+function formatDateTime(value) {
+  if (!value) return '未知时间';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 async function request(url, options = {}) {

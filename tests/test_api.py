@@ -79,6 +79,30 @@ def test_projects_endpoint_lists_persisted_projects():
     assert any(item["id"] == created.json()["id"] for item in response.json()["projects"])
 
 
+def test_project_delete_removes_project_record_and_files():
+    created = client.post("/api/projects", json={"text": "待删除历史项目。"})
+    project_id = created.json()["id"]
+    project_root = project_store.PROJECTS_DIR / project_id
+    output_root = project_store.OUTPUTS_DIR / project_id
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "demo.wav").write_bytes(b"RIFFfakeWAVE")
+
+    response = client.delete(f"/api/projects/{project_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"id": project_id, "deleted": True}
+    assert client.get(f"/api/projects/{project_id}").status_code == 404
+    assert not project_root.exists()
+    assert not output_root.exists()
+    assert all(item["id"] != project_id for item in client.get("/api/projects").json()["projects"])
+
+
+def test_project_delete_returns_404_for_missing_project():
+    response = client.delete("/api/projects/missing-project")
+
+    assert response.status_code == 404
+
+
 def test_existing_project_folder_is_imported():
     project_id = "legacyabc123"
     root = project_store.PROJECTS_DIR / project_id

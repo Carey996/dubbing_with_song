@@ -51,6 +51,12 @@ def get_project_row(project_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def delete_project_record(project_id: str) -> None:
+    initialize_database()
+    with transaction() as conn:
+        conn.execute(read_sql("delete_project.sql"), {"project_id": project_id})
+
+
 def get_latest_render(project_id: str) -> dict | None:
     initialize_database()
     with transaction() as conn:

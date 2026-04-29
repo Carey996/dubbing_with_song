@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -94,6 +95,16 @@ def create_project(text: str) -> Project:
 
 def list_projects() -> list[dict]:
     return project_repository.list_projects()
+
+
+def delete_project(project_id: str) -> dict:
+    project = get_project(project_id)
+    output_root = OUTPUTS_DIR / project.id
+
+    remove_tree(project.root, PROJECTS_DIR)
+    remove_tree(output_root, OUTPUTS_DIR)
+    project_repository.delete_project_record(project.id)
+    return {"id": project.id, "deleted": True}
 
 
 def get_project(project_id: str) -> Project:
@@ -306,6 +317,15 @@ def read_json(path: Path) -> dict:
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def remove_tree(path: Path, expected_parent: Path) -> None:
+    resolved = path.resolve()
+    parent = expected_parent.resolve()
+    if parent not in resolved.parents:
+        raise HTTPException(status_code=400, detail="Refusing to delete outside project storage.")
+    if resolved.exists():
+        shutil.rmtree(resolved)
 
 
 def derive_title(text: str) -> str:
