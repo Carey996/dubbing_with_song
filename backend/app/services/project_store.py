@@ -9,6 +9,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from .db import initialize_database, transaction
+
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 DATA_DIR = BASE_DIR / "data"
@@ -60,6 +62,7 @@ class Project:
 
 
 def create_project(text: str) -> Project:
+    initialize_database()
     normalized = (text or "").strip()
     if not normalized:
         raise HTTPException(status_code=400, detail="Text content is required.")
@@ -71,9 +74,52 @@ def create_project(text: str) -> Project:
         "id": project_id,
         "createdAt": datetime.now(timezone.utc).isoformat(),
     }
-    (root / "source.txt").write_text(normalized, encoding="utf-8")
+    source_path = root / "source.txt"
+    source_path.write_text(normalized, encoding="utf-8")
     write_json(root / "metadata.json", metadata)
+    now = metadata["createdAt"]
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO projects(id, title, created_at, updated_at, status, text_length, source_path)
+            VALUES (?, ?, ?, ?, 'created', ?, ?)
+            """,
+            (project_id, derive_title(normalized), now, now, len(normalized), str(source_path)),
+        )
+        register_asset(conn, project_id, "source_text", source_path, now)
     return Project(project_id, normalized, root, metadata)
+
+
+def list_projects() -> list[dict]:
+    initialize_database()
+    with transaction() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+              p.*,
+              EXISTS(SELECT 1 FROM analyses a WHERE a.project_id = p.id AND a.status = 'succeeded') AS has_analysis,
+              EXISTS(SELECT 1 FROM project_assets pa WHERE pa.project_id = p.id AND pa.asset_type = 'song_mp3') AS has_song,
+              EXISTS(SELECT 1 FROM project_assets pa WHERE pa.project_id = p.id AND pa.asset_type = 'timeline_json') AS has_timeline,
+              EXISTS(SELECT 1 FROM renders r WHERE r.project_id = p.id AND r.status = 'succeeded') AS has_render
+            FROM projects p
+            ORDER BY p.updated_at DESC
+            """
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+            "status": row["status"],
+            "textLength": row["text_length"],
+            "hasAnalysis": bool(row["has_analysis"]),
+            "hasSong": bool(row["has_song"]),
+            "hasTimeline": bool(row["has_timeline"]),
+            "hasRender": bool(row["has_render"]),
+        }
+        for row in rows
+    ]
 
 
 def get_project(project_id: str) -> Project:
@@ -171,3 +217,35 @@ def read_json(path: Path) -> dict:
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def derive_title(text: str) -> str:
+    for line in text.splitlines():
+        title = line.strip()
+        if title:
+            return title[:40]
+    return "未命名项目"
+
+
+def register_asset(conn, project_id: str, asset_type: str, path: Path, created_at: str, metadata: dict | None = None) -> None:
+    if not path.exists():
+        return
+    conn.execute(
+        """
+        INSERT INTO project_assets(id, project_id, asset_type, path, filename, size_bytes, created_at, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, asset_type, path) DO UPDATE SET
+          size_bytes = excluded.size_bytes,
+          metadata_json = excluded.metadata_json
+        """,
+        (
+            uuid.uuid4().hex,
+            project_id,
+            asset_type,
+            str(path),
+            path.name,
+            path.stat().st_size,
+            created_at,
+            json.dumps(metadata or {}, ensure_ascii=False),
+        ),
+    )

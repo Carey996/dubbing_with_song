@@ -9,13 +9,41 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from backend.app.main import app
 from backend.app.routers import projects
+from backend.app.services import db
 from backend.app.services import analyzer
+from backend.app.services import project_store
 from backend.app.services import renderer
 from backend.app.services.chapter_service import TextChapter, split_text_into_chapters
+from backend.app.services.project_store import list_projects
 
 
 client = TestClient(app)
 TEST_TMP_DIR = Path("pytest-cache-files-ai-tts")
+
+
+def test_project_creation_writes_sqlite_metadata():
+    created = client.post("/api/projects", json={"text": "第一章 登台\n内容一。"})
+    assert created.status_code == 200
+
+    projects_list = list_projects()
+
+    assert any(item["id"] == created.json()["id"] for item in projects_list)
+    saved = next(item for item in projects_list if item["id"] == created.json()["id"])
+    assert saved["title"] == "第一章 登台"
+    assert saved["status"] == "created"
+    assert saved["textLength"] == len("第一章 登台\n内容一。")
+    assert saved["hasAnalysis"] is False
+    assert saved["hasSong"] is False
+    assert saved["hasTimeline"] is False
+    assert saved["hasRender"] is False
+
+
+def test_database_schema_version_is_initialized():
+    db.initialize_database()
+    with db.connect() as conn:
+        value = conn.execute("select value from schema_meta where key = 'schema_version'").fetchone()[0]
+
+    assert value == "1"
 
 
 def fake_analysis(text: str) -> dict:
