@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from .db import initialize_database, transaction
+from ..repositories import project_repository
 
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -44,7 +44,7 @@ class Project:
         return output_dir
 
     def public_dict(self, include_text: bool = False) -> dict:
-        latest_render = get_latest_render(self.id)
+        latest_render = project_repository.get_latest_render(self.id)
         payload = {
             "id": self.id,
             "title": self.metadata.get("title") or derive_title(self.text),
@@ -68,7 +68,6 @@ class Project:
 
 
 def create_project(text: str) -> Project:
-    initialize_database()
     normalized = (text or "").strip()
     if not normalized:
         raise HTTPException(status_code=400, detail="Text content is required.")
@@ -84,48 +83,12 @@ def create_project(text: str) -> Project:
     source_path.write_text(normalized, encoding="utf-8")
     write_json(root / "metadata.json", metadata)
     now = metadata["createdAt"]
-    with transaction() as conn:
-        conn.execute(
-            """
-            INSERT INTO projects(id, title, created_at, updated_at, status, text_length, source_path)
-            VALUES (?, ?, ?, ?, 'created', ?, ?)
-            """,
-            (project_id, derive_title(normalized), now, now, len(normalized), str(source_path)),
-        )
-        register_asset(conn, project_id, "source_text", source_path, now)
+    project_repository.create_project_record(project_id, derive_title(normalized), now, len(normalized), source_path)
     return Project(project_id, normalized, root, metadata)
 
 
 def list_projects() -> list[dict]:
-    initialize_database()
-    with transaction() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-              p.*,
-              EXISTS(SELECT 1 FROM analyses a WHERE a.project_id = p.id AND a.status = 'succeeded') AS has_analysis,
-              EXISTS(SELECT 1 FROM project_assets pa WHERE pa.project_id = p.id AND pa.asset_type = 'song_mp3') AS has_song,
-              EXISTS(SELECT 1 FROM project_assets pa WHERE pa.project_id = p.id AND pa.asset_type = 'timeline_json') AS has_timeline,
-              EXISTS(SELECT 1 FROM renders r WHERE r.project_id = p.id AND r.status = 'succeeded') AS has_render
-            FROM projects p
-            ORDER BY p.updated_at DESC
-            """
-        ).fetchall()
-    return [
-        {
-            "id": row["id"],
-            "title": row["title"],
-            "createdAt": row["created_at"],
-            "updatedAt": row["updated_at"],
-            "status": row["status"],
-            "textLength": row["text_length"],
-            "hasAnalysis": bool(row["has_analysis"]),
-            "hasSong": bool(row["has_song"]),
-            "hasTimeline": bool(row["has_timeline"]),
-            "hasRender": bool(row["has_render"]),
-        }
-        for row in rows
-    ]
+    return project_repository.list_projects()
 
 
 def get_project(project_id: str) -> Project:
@@ -139,7 +102,7 @@ def get_project(project_id: str) -> Project:
         raise HTTPException(status_code=404, detail="Project not found.")
 
     metadata = read_json(metadata_path)
-    row = get_project_row(project_id)
+    row = project_repository.get_project_row(project_id)
     if row:
         metadata = {
             **metadata,
@@ -155,42 +118,7 @@ def get_project(project_id: str) -> Project:
         metadata=metadata,
     )
 
-
-def get_project_row(project_id: str) -> dict | None:
-    initialize_database()
-    with transaction() as conn:
-        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-    return dict(row) if row else None
-
-
-def get_latest_render(project_id: str) -> dict | None:
-    initialize_database()
-    with transaction() as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM renders
-            WHERE project_id = ? AND status = 'succeeded'
-            ORDER BY updated_at DESC
-            LIMIT 1
-            """,
-            (project_id,),
-        ).fetchone()
-    if not row:
-        return None
-    return {
-        "id": row["id"],
-        "status": row["status"],
-        "outputUrl": row["output_url"],
-        "outputPath": row["output_path"],
-        "message": row["message"],
-        "warnings": json.loads(row["warnings_json"] or "[]"),
-        "createdAt": row["created_at"],
-        "updatedAt": row["updated_at"],
-    }
-
-
 def import_existing_projects() -> None:
-    initialize_database()
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     for root in PROJECTS_DIR.iterdir():
         metadata_path = root / "metadata.json"
@@ -211,22 +139,18 @@ def import_existing_projects() -> None:
         if (root / "song.mp3").exists():
             status = "song_uploaded"
 
-        with transaction() as conn:
-            conn.execute(
-                """
-                INSERT INTO projects(id, title, created_at, updated_at, status, text_length, source_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO NOTHING
-                """,
-                (project_id, derive_title(text), created_at, updated_at, status, len(text), str(source_path)),
-            )
-            register_asset(conn, project_id, "source_text", source_path, created_at)
-            if (root / "analysis.json").exists():
-                register_asset(conn, project_id, "analysis_json", root / "analysis.json", created_at)
-            if (root / "timeline.json").exists():
-                register_asset(conn, project_id, "timeline_json", root / "timeline.json", created_at)
-            if (root / "song.mp3").exists():
-                register_asset(conn, project_id, "song_mp3", root / "song.mp3", created_at)
+        project_repository.import_existing_project_record(
+            project_id=project_id,
+            title=derive_title(text),
+            created_at=created_at,
+            updated_at=updated_at,
+            status=status,
+            text_length=len(text),
+            source_path=source_path,
+            analysis_path=root / "analysis.json",
+            timeline_path=root / "timeline.json",
+            song_path=root / "song.mp3",
+        )
 
 
 def save_analysis(
@@ -247,71 +171,25 @@ def save_analysis(
 
     segment_count = len(analysis.get("segments") or [])
     lyric_count = len([segment for segment in analysis.get("segments") or [] if segment.get("type") == "lyric"])
-    with transaction() as conn:
-        conn.execute(
-            """
-            INSERT INTO analyses(
-              id, project_id, scope, chapter_id, chapter_title, status, engine, result_path,
-              segment_count, lyric_count, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                analysis_id,
-                project_id,
-                scope,
-                chapter_id,
-                chapter_title,
-                analysis.get("analysisEngine"),
-                str(result_path),
-                segment_count,
-                lyric_count,
-                now,
-                now,
-            ),
-        )
-        conn.execute(
-            """
-            UPDATE projects
-            SET status = 'analyzed', updated_at = ?, current_analysis_id = ?
-            WHERE id = ?
-            """,
-            (now, analysis_id, project_id),
-        )
-        register_asset(conn, project_id, "analysis_json", result_path, now, {"analysisId": analysis_id, "scope": scope})
-        register_asset(conn, project_id, "timeline_json", project.timeline_path, now)
+    project_repository.save_analysis_record(
+        project_id=project_id,
+        analysis_id=analysis_id,
+        scope=scope,
+        chapter_id=chapter_id,
+        chapter_title=chapter_title,
+        engine=analysis.get("analysisEngine"),
+        result_path=result_path,
+        timeline_path=project.timeline_path,
+        segment_count=segment_count,
+        lyric_count=lyric_count,
+        created_at=now,
+    )
     return {"id": analysis_id, **analysis}
 
 
 def list_analyses(project_id: str) -> list[dict]:
     get_project(project_id)
-    initialize_database()
-    with transaction() as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM analyses
-            WHERE project_id = ?
-            ORDER BY created_at DESC
-            """,
-            (project_id,),
-        ).fetchall()
-    return [
-        {
-            "id": row["id"],
-            "projectId": row["project_id"],
-            "scope": row["scope"],
-            "chapterId": row["chapter_id"],
-            "chapterTitle": row["chapter_title"],
-            "status": row["status"],
-            "engine": row["engine"],
-            "segmentCount": row["segment_count"],
-            "lyricCount": row["lyric_count"],
-            "error": row["error"],
-            "createdAt": row["created_at"],
-            "updatedAt": row["updated_at"],
-        }
-        for row in rows
-    ]
+    return project_repository.list_analyses(project_id)
 
 
 def save_song_file(project_id: str, filename: str, content: bytes) -> dict:
@@ -393,27 +271,3 @@ def derive_title(text: str) -> str:
         if title:
             return title[:40]
     return "未命名项目"
-
-
-def register_asset(conn, project_id: str, asset_type: str, path: Path, created_at: str, metadata: dict | None = None) -> None:
-    if not path.exists():
-        return
-    conn.execute(
-        """
-        INSERT INTO project_assets(id, project_id, asset_type, path, filename, size_bytes, created_at, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(project_id, asset_type, path) DO UPDATE SET
-          size_bytes = excluded.size_bytes,
-          metadata_json = excluded.metadata_json
-        """,
-        (
-            uuid.uuid4().hex,
-            project_id,
-            asset_type,
-            str(path),
-            path.name,
-            path.stat().st_size,
-            created_at,
-            json.dumps(metadata or {}, ensure_ascii=False),
-        ),
-    )

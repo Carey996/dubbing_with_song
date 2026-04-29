@@ -7,8 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import load_env
+from .repositories.db import initialize_database
 from .routers import projects
-from .services.db import initialize_database
 from .services.project_store import import_existing_projects
 
 

@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from backend.app.main import app
 from backend.app.routers import projects
-from backend.app.services import db
+from backend.app.repositories import db
 from backend.app.services import analyzer
 from backend.app.services import project_store
 from backend.app.services import renderer
@@ -19,6 +19,30 @@ from backend.app.services.project_store import list_projects
 
 client = TestClient(app)
 TEST_TMP_DIR = Path("pytest-cache-files-ai-tts")
+
+
+def test_project_store_keeps_sql_out_of_service_layer():
+    source = Path(project_store.__file__).read_text(encoding="utf-8")
+
+    assert "conn.execute" not in source
+    assert "transaction()" not in source
+    assert "from .db import" not in source
+    assert "db.initialize_database" not in source
+
+
+def test_repository_sql_is_loaded_from_sql_files():
+    repository_dir = Path(project_store.__file__).parents[1] / "repositories"
+    for path in repository_dir.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        assert "CREATE TABLE" not in source
+        assert "SELECT *" not in source
+        assert "INSERT INTO" not in source
+        assert "UPDATE projects" not in source
+
+    sql_files = {path.name for path in (repository_dir / "sql").glob("*.sql")}
+    assert "schema.sql" in sql_files
+    assert "list_projects.sql" in sql_files
+    assert "save_analysis.sql" in sql_files
 
 
 def test_project_creation_writes_sqlite_metadata():

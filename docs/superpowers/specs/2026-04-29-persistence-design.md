@@ -104,13 +104,14 @@ Render outputs live under `data/outputs/<project_id>/<render_id>/`. A successful
 
 ## Service Boundaries
 
-Create a small persistence layer under `backend/app/services/`:
+Create a small persistence layer under `backend/app/repositories/`:
 
 - `db.py`: SQLite connection, schema initialization, transaction helper, row helpers.
-- `project_store.py`: remains the public project workflow service, but delegates metadata reads/writes to SQLite.
-- `asset_store.py` if the asset bookkeeping becomes too large for `project_store.py`.
+- `project_repository.py`: project, asset, analysis, and render metadata queries and writes.
+- `sql/*.sql`: schema and repository SQL statements. Python repository modules read these files and bind parameters at execution time.
+- Additional repository modules if asset or render bookkeeping becomes too large for `project_repository.py`.
 
-The router should continue to call workflow functions rather than raw database functions. This preserves the current service boundary used by both FastAPI routes and the CLI.
+`project_store.py` remains the public workflow service used by both FastAPI routes and the CLI, but it must not contain raw SQL, transaction management, or database initialization. Routers continue to call workflow functions rather than repository functions.
 
 ## Workflow Changes
 
