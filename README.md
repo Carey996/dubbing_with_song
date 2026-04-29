@@ -67,6 +67,17 @@ python -m backend.app.cli .\story.txt --chapter chap-002
 
 CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节切分、分析、上传歌曲和渲染 service。默认会创建项目并执行章节切分与全篇文本分析；传 `--chapter chap-002` 时只分析指定章节，传 `--chapters-only` 时只输出章节切分结果，传 `--no-analyze` 时创建项目并输出章节但不调用 LLM。
 
+## 本地持久化
+
+项目使用 SQLite + 本地文件资产保存完整流程状态：
+
+- `data/app.sqlite3` 保存项目列表、分析历史、渲染历史和资产索引。
+- `backend/app/repositories/sql/*.sql` 保存建表和查询语句，运行时由 repository 层读取并绑定参数执行。
+- `data/projects/<project_id>/` 保存原始文本、上传 MP3、分析 JSON 和时间轴 JSON。
+- `data/outputs/<project_id>/` 保存生成的音频文件；每次渲染会进入独立的 render 目录。
+
+后端启动时会初始化 SQLite，并扫描已有 `data/projects` 目录导入旧项目。刷新页面或重启服务后，可以从页面左侧历史项目列表重新打开项目，恢复文本、分析结果、时间轴、歌曲状态和最近一次生成结果。
+
 ## 当前能力
 
 - 支持粘贴文本或上传 `.txt` 创建项目。

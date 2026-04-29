@@ -73,3 +73,13 @@ def test_cli_can_skip_analysis():
 
     assert payload["project"]["id"]
     assert "analysis" not in payload
+
+
+def test_cli_created_project_is_listed(monkeypatch):
+    monkeypatch.setattr(cli, "analyze_text", fake_analysis)
+    source = write_test_txt("cli-persisted-story.txt", "CLI 持久化正文。")
+
+    payload = run([str(source), "--no-analyze"])
+    from backend.app.services.project_store import list_projects
+
+    assert any(item["id"] == payload["project"]["id"] for item in list_projects())
