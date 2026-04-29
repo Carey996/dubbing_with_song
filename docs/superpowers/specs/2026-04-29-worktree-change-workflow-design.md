@@ -29,6 +29,7 @@ The project already ignores `.worktrees/`, so task worktrees can live inside the
 - Make all task edits inside the task worktree.
 - Keep the branch focused on the requested change.
 - Do not clean, revert, or stage unrelated changes from another checkout.
+- When running dev servers from a task worktree, use backup ports so the trunk checkout remains available for acceptance testing. Avoid the default trunk ports `28080` for the backend and `5173` for the frontend; prefer `28081+` for backend runs, `5174+` through `VITE_DEV_PORT` for frontend runs, and set `VITE_BACKEND_URL` to the matching backup backend URL.
 - Run verification that matches the change risk before presenting the work as complete.
 - If verification cannot run or is blocked by environment constraints, report the blocker and the remaining risk.
 
@@ -64,4 +65,5 @@ For discard, require explicit confirmation before deleting any branch or worktre
 - Repository-level instructions tell future agents to prefer worktrees before edits.
 - The detailed spec documents start, work, finish, merge, and cleanup behavior.
 - The workflow preserves unrelated dirty changes in the main checkout.
+- Worktree dev-server runs use backup ports and do not occupy the trunk checkout's default acceptance ports.
 - The workflow asks before merging and cleans the worktree only after a successful merge or confirmed discard.
