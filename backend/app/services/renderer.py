@@ -40,7 +40,7 @@ def render_project(project: Project) -> dict:
         return {
             "status": "mixed",
             "message": "已生成旁白 + MP3 BGM 混音。",
-            "outputUrl": f"/outputs/{project.id}/{output_path.name}",
+            "outputUrl": project.output_url(output_path),
             "warnings": [],
         }
 
@@ -50,7 +50,7 @@ def render_project(project: Project) -> dict:
     return {
         "status": "narration-only",
         "message": "已生成旁白 WAV。",
-        "outputUrl": f"/outputs/{project.id}/{narration_path.name}",
+        "outputUrl": project.output_url(narration_path),
         "warnings": warnings,
     }
 

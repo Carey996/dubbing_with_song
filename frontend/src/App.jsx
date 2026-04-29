@@ -16,6 +16,7 @@ function App() {
   const [txtFile, setTxtFile] = useState(null);
   const [songFile, setSongFile] = useState(null);
   const [project, setProject] = useState(null);
+  const [projectList, setProjectList] = useState([]);
   const [analysis, setAnalysis] = useState(null);
   const [chapters, setChapters] = useState([]);
   const [selectedChapterId, setSelectedChapterId] = useState('');
@@ -56,11 +57,63 @@ function App() {
     return () => window.clearInterval(timer);
   }, [isAnalyzing]);
 
+  useEffect(() => {
+    loadProjectList();
+  }, []);
+
   function applyChapters(nextChapters) {
     setChapters(nextChapters);
     setSelectedChapterId((currentId) => (
       nextChapters.some((chapter) => chapter.id === currentId) ? currentId : nextChapters[0]?.id || ''
     ));
+  }
+
+  async function loadProjectList() {
+    try {
+      const data = await request('/api/projects');
+      setProjectList(data.projects || []);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  function applyProjectDetail(data, nextChapters = null) {
+    setProject(data);
+    setText(data.text || '');
+    setTxtFile(null);
+    setSongFile(null);
+    setAnalysis(data.analysis || null);
+    setTimeline(data.timeline || emptyTimeline);
+    setRenderResult(data.latestRender || null);
+    if (nextChapters) {
+      applyChapters(nextChapters);
+    } else if (data.analysis?.chapters?.length) {
+      applyChapters(data.analysis.chapters);
+    } else {
+      applyChapters([]);
+    }
+  }
+
+  async function refreshProject(projectId) {
+    const [detail, chapterData] = await Promise.all([
+      request(`/api/projects/${projectId}`),
+      request(`/api/projects/${projectId}/chapters`),
+    ]);
+    applyProjectDetail(detail, chapterData.chapters || []);
+    await loadProjectList();
+  }
+
+  async function loadProject(projectId) {
+    if (!projectId) return;
+    setBusy('loading-project');
+    setError('');
+    try {
+      await refreshProject(projectId);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy('');
+    }
   }
 
   async function createProject() {
@@ -85,6 +138,7 @@ function App() {
       setAnalysis(null);
       await loadChapters(data.id);
       setTimeline(emptyTimeline);
+      await loadProjectList();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -110,6 +164,7 @@ function App() {
       applyChapters(data.chapters || chapters);
       setTimeline(data.timeline);
       setAnalysisProgress(completeAnalysisProgress());
+      await refreshProject(project.id);
       completed = true;
     } catch (err) {
       setError(err.message);
@@ -138,7 +193,7 @@ function App() {
       const form = new FormData();
       form.append('file', songFile);
       await request(`/api/projects/${project.id}/song-file`, { method: 'POST', body: form });
-      setProject({ ...project, hasSong: true });
+      await refreshProject(project.id);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -157,6 +212,7 @@ function App() {
         body: JSON.stringify(timeline),
       });
       setTimeline(data);
+      await loadProjectList();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -172,6 +228,7 @@ function App() {
       await saveTimeline();
       const data = await request(`/api/projects/${project.id}/render`, { method: 'POST' });
       setRenderResult(data);
+      await refreshProject(project.id);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -236,6 +293,23 @@ function App() {
             <Upload size={18} />
             创建项目
           </button>
+          {projectList.length > 0 && (
+            <div className="project-history">
+              <PanelTitle icon={<BookOpen />} title="历史项目" />
+              {projectList.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`project-history-item ${project?.id === item.id ? 'active' : ''}`}
+                  onClick={() => loadProject(item.id)}
+                  disabled={busy}
+                >
+                  <span>{item.title || item.id}</span>
+                  <small>{item.status} · {item.textLength} 字</small>
+                </button>
+              ))}
+            </div>
+          )}
           <button onClick={analyzeProject} disabled={busy || !project}>
             {isAnalyzing ? <span className="spinner" aria-hidden="true" /> : <Sparkles size={18} />}
             {isAnalyzing ? '分析中' : selectedChapter ? '分析当前章节' : 'AI 分析'}

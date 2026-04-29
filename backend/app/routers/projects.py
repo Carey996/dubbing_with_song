@@ -9,8 +9,14 @@ from starlette.datastructures import UploadFile
 from ..services.analyzer import analyze_text
 from ..services.chapter_service import split_text_into_chapters
 from ..services.project_store import (
+    complete_render_record,
     create_project,
+    create_render_record,
+    fail_render_record,
     get_project,
+    list_analyses,
+    list_projects,
+    list_renders,
     save_analysis,
     save_song_file,
     save_timeline,
@@ -23,6 +29,11 @@ router = APIRouter(tags=["projects"])
 
 class CreateProjectRequest(BaseModel):
     text: str
+
+
+@router.get("/projects")
+def list_projects_endpoint() -> dict:
+    return {"projects": list_projects()}
 
 
 @router.post("/projects")
@@ -47,8 +58,7 @@ async def create_project_from_text_file_endpoint(request: Request) -> dict:
 def analyze_project_endpoint(project_id: str) -> dict:
     project = get_project(project_id)
     analysis = analyze_text(project.text)
-    save_analysis(project_id, analysis)
-    return analysis
+    return save_analysis(project_id, analysis, scope="all")
 
 
 @router.post("/projects/{project_id}/chapters/{chapter_id}/analyze")
@@ -59,7 +69,13 @@ def analyze_project_chapter_endpoint(project_id: str, chapter_id: str) -> dict:
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found.")
 
-    return analyze_text(chapter.text, chapters=[chapter])
+    analysis = analyze_text(chapter.text, chapters=[chapter])
+    return save_analysis(project_id, analysis, scope="chapter", chapter_id=chapter.id, chapter_title=chapter.title)
+
+
+@router.get("/projects/{project_id}/analyses")
+def list_project_analyses_endpoint(project_id: str) -> dict:
+    return {"projectId": project_id, "analyses": list_analyses(project_id)}
 
 
 @router.get("/projects/{project_id}/chapters")
@@ -98,9 +114,23 @@ async def update_timeline_endpoint(project_id: str, request: Request) -> dict:
 
 @router.post("/projects/{project_id}/render")
 def render_project_endpoint(project_id: str) -> dict:
+    render_id = create_render_record(project_id)
     project = get_project(project_id)
-    result = render_project(project)
-    return result
+    project.metadata["renderId"] = render_id
+    try:
+        result = render_project(project)
+    except HTTPException as exc:
+        fail_render_record(project_id, render_id, str(exc.detail))
+        raise
+    except Exception as exc:
+        fail_render_record(project_id, render_id, str(exc))
+        raise
+    return complete_render_record(project_id, render_id, result)
+
+
+@router.get("/projects/{project_id}/renders")
+def list_project_renders_endpoint(project_id: str) -> dict:
+    return {"projectId": project_id, "renders": list_renders(project_id)}
 
 
 @router.get("/projects/{project_id}")

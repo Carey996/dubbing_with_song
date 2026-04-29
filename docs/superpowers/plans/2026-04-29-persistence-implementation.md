@@ -10,11 +10,17 @@
 
 ---
 
+## Review Amendment
+
+SQL-specific code must live outside the service layer. Use `backend/app/repositories/db.py` for SQLite connection/schema helpers and `backend/app/repositories/project_repository.py` for project, asset, analysis, and render metadata query execution. SQL text itself lives in `backend/app/repositories/sql/*.sql`; Python reads those files and binds parameters at execution time. `backend/app/services/project_store.py` remains the workflow service and may call repository functions, but it must not contain raw SQL, transaction management, or direct database initialization.
+
 ## File Structure
 
-- Create `backend/app/services/db.py`: SQLite path constants, connection helper, schema initialization, transaction helper, row conversion, and existing-folder import.
+- Create `backend/app/repositories/db.py`: SQLite path constants, connection helper, schema initialization, transaction helper, and row conversion.
+- Create `backend/app/repositories/project_repository.py`: all SQL queries and writes for projects, assets, analyses, and renders.
+- Create `backend/app/repositories/sql/*.sql`: schema and executable SQL statements loaded by repository functions.
 - Modify `backend/app/main.py`: initialize SQLite and import existing project folders during app startup.
-- Modify `backend/app/services/project_store.py`: keep public workflow functions but back metadata, analysis, timeline, song, and render records with SQLite.
+- Modify `backend/app/services/project_store.py`: keep public workflow functions and delegate all metadata operations to repositories.
 - Modify `backend/app/services/renderer.py`: render into a caller-supplied output directory so each render attempt can get its own persisted folder.
 - Modify `backend/app/routers/projects.py`: add project list, analysis history, render history endpoints; make chapter analysis save results.
 - Modify `backend/app/cli.py`: keep CLI on the same service functions and ensure DB is initialized for CLI usage.
@@ -36,6 +42,7 @@ Append these tests near the top of `tests/test_api.py`, after constants:
 
 ```python
 from backend.app.services import db
+from backend.app.services import project_store
 from backend.app.services.project_store import list_projects
 
 
@@ -315,12 +322,12 @@ def test_projects_endpoint_lists_persisted_projects():
 
 def test_existing_project_folder_is_imported():
     project_id = "legacyabc123"
-    root = projects.PROJECTS_DIR / project_id
+    root = project_store.PROJECTS_DIR / project_id
     root.mkdir(parents=True, exist_ok=True)
     (root / "source.txt").write_text("旧项目正文。", encoding="utf-8")
-    projects.write_json(root / "metadata.json", {"id": project_id, "createdAt": "2026-04-29T00:00:00+00:00"})
+    project_store.write_json(root / "metadata.json", {"id": project_id, "createdAt": "2026-04-29T00:00:00+00:00"})
 
-    projects.import_existing_projects()
+    project_store.import_existing_projects()
     response = client.get(f"/api/projects/{project_id}")
 
     assert response.status_code == 200

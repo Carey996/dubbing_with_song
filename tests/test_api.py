@@ -9,13 +9,170 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from backend.app.main import app
 from backend.app.routers import projects
+from backend.app.repositories import db
 from backend.app.services import analyzer
+from backend.app.services import project_store
 from backend.app.services import renderer
 from backend.app.services.chapter_service import TextChapter, split_text_into_chapters
+from backend.app.services.project_store import list_projects
 
 
 client = TestClient(app)
 TEST_TMP_DIR = Path("pytest-cache-files-ai-tts")
+
+
+def test_project_store_keeps_sql_out_of_service_layer():
+    source = Path(project_store.__file__).read_text(encoding="utf-8")
+
+    assert "conn.execute" not in source
+    assert "transaction()" not in source
+    assert "from .db import" not in source
+    assert "db.initialize_database" not in source
+
+
+def test_repository_sql_is_loaded_from_sql_files():
+    repository_dir = Path(project_store.__file__).parents[1] / "repositories"
+    for path in repository_dir.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        assert "CREATE TABLE" not in source
+        assert "SELECT *" not in source
+        assert "INSERT INTO" not in source
+        assert "UPDATE projects" not in source
+
+    sql_files = {path.name for path in (repository_dir / "sql").glob("*.sql")}
+    assert "schema.sql" in sql_files
+    assert "list_projects.sql" in sql_files
+    assert "save_analysis.sql" in sql_files
+
+
+def test_project_creation_writes_sqlite_metadata():
+    created = client.post("/api/projects", json={"text": "第一章 登台\n内容一。"})
+    assert created.status_code == 200
+
+    projects_list = list_projects()
+
+    assert any(item["id"] == created.json()["id"] for item in projects_list)
+    saved = next(item for item in projects_list if item["id"] == created.json()["id"])
+    assert saved["title"] == "第一章 登台"
+    assert saved["status"] == "created"
+    assert saved["textLength"] == len("第一章 登台\n内容一。")
+    assert saved["hasAnalysis"] is False
+    assert saved["hasSong"] is False
+    assert saved["hasTimeline"] is False
+    assert saved["hasRender"] is False
+
+
+def test_database_schema_version_is_initialized():
+    db.initialize_database()
+    with db.connect() as conn:
+        value = conn.execute("select value from schema_meta where key = 'schema_version'").fetchone()[0]
+
+    assert value == "1"
+
+
+def test_projects_endpoint_lists_persisted_projects():
+    created = client.post("/api/projects", json={"text": "历史项目内容。"})
+
+    response = client.get("/api/projects")
+
+    assert response.status_code == 200
+    assert any(item["id"] == created.json()["id"] for item in response.json()["projects"])
+
+
+def test_existing_project_folder_is_imported():
+    project_id = "legacyabc123"
+    root = project_store.PROJECTS_DIR / project_id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "source.txt").write_text("旧项目正文。", encoding="utf-8")
+    project_store.write_json(root / "metadata.json", {"id": project_id, "createdAt": "2026-04-29T00:00:00+00:00"})
+
+    project_store.import_existing_projects()
+    response = client.get(f"/api/projects/{project_id}")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == project_id
+    assert response.json()["title"] == "旧项目正文。"
+    assert response.json()["text"] == "旧项目正文。"
+
+
+def test_full_analysis_is_persisted_with_history(monkeypatch):
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+
+    analyzed = client.post(f"/api/projects/{project_id}/analyze")
+    history = client.get(f"/api/projects/{project_id}/analyses")
+    detail = client.get(f"/api/projects/{project_id}")
+
+    assert analyzed.status_code == 200
+    assert history.status_code == 200
+    assert history.json()["analyses"][0]["scope"] == "all"
+    assert history.json()["analyses"][0]["status"] == "succeeded"
+    assert detail.json()["analysis"]["analysisEngine"] == "test-double"
+    assert detail.json()["timeline"]["segments"]
+
+
+def test_chapter_analysis_is_persisted_with_scope(monkeypatch):
+    def fake_chapter_analysis(text: str, chapters=None):
+        return fake_analysis(text)
+
+    monkeypatch.setattr(projects, "analyze_text", fake_chapter_analysis)
+    project_id = client.post("/api/projects", json={"text": "第一章 登台\n内容一。\n\n第二章 唱歌\n内容二。"}).json()["id"]
+
+    response = client.post(f"/api/projects/{project_id}/chapters/chap-002/analyze")
+    history = client.get(f"/api/projects/{project_id}/analyses")
+
+    assert response.status_code == 200
+    assert history.json()["analyses"][0]["scope"] == "chapter"
+    assert history.json()["analyses"][0]["chapterId"] == "chap-002"
+    assert history.json()["analyses"][0]["chapterTitle"] == "第二章 唱歌"
+
+
+def test_song_and_timeline_updates_are_reflected_in_project_list(monkeypatch):
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    timeline = client.post(f"/api/projects/{project_id}/analyze").json()["timeline"]
+    timeline["bgmVolume"] = 0.42
+    client.patch(f"/api/projects/{project_id}/timeline", json=timeline)
+    client.post(
+        f"/api/projects/{project_id}/song-file",
+        files={"file": ("demo.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00", "audio/mpeg")},
+    )
+
+    listed = client.get("/api/projects").json()["projects"]
+    item = next(row for row in listed if row["id"] == project_id)
+    detail = client.get(f"/api/projects/{project_id}").json()
+
+    assert item["hasSong"] is True
+    assert item["hasTimeline"] is True
+    assert detail["timeline"]["bgmVolume"] == 0.42
+
+
+def test_render_result_is_persisted_with_history(monkeypatch):
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    client.post(f"/api/projects/{project_id}/analyze")
+
+    def fake_render(project):
+        output_dir = project.output_dir
+        output_path = output_dir / "narration.wav"
+        output_path.write_bytes(b"RIFFfakeWAVE")
+        return {
+            "status": "narration-only",
+            "message": "测试生成完成。",
+            "outputUrl": project.output_url(output_path),
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(projects, "render_project", fake_render)
+    rendered = client.post(f"/api/projects/{project_id}/render")
+    history = client.get(f"/api/projects/{project_id}/renders")
+    detail = client.get(f"/api/projects/{project_id}")
+
+    assert rendered.status_code == 200
+    assert history.json()["renders"][0]["status"] == "succeeded"
+    assert history.json()["renders"][0]["outputUrl"]
+    assert f"/outputs/{project_id}/" in history.json()["renders"][0]["outputUrl"]
+    assert detail.json()["latestRender"]["message"] == "测试生成完成。"
 
 
 def fake_analysis(text: str) -> dict:
