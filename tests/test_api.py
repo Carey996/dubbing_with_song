@@ -71,6 +71,38 @@ def test_existing_project_folder_is_imported():
     assert response.json()["text"] == "旧项目正文。"
 
 
+def test_full_analysis_is_persisted_with_history(monkeypatch):
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+
+    analyzed = client.post(f"/api/projects/{project_id}/analyze")
+    history = client.get(f"/api/projects/{project_id}/analyses")
+    detail = client.get(f"/api/projects/{project_id}")
+
+    assert analyzed.status_code == 200
+    assert history.status_code == 200
+    assert history.json()["analyses"][0]["scope"] == "all"
+    assert history.json()["analyses"][0]["status"] == "succeeded"
+    assert detail.json()["analysis"]["analysisEngine"] == "test-double"
+    assert detail.json()["timeline"]["segments"]
+
+
+def test_chapter_analysis_is_persisted_with_scope(monkeypatch):
+    def fake_chapter_analysis(text: str, chapters=None):
+        return fake_analysis(text)
+
+    monkeypatch.setattr(projects, "analyze_text", fake_chapter_analysis)
+    project_id = client.post("/api/projects", json={"text": "第一章 登台\n内容一。\n\n第二章 唱歌\n内容二。"}).json()["id"]
+
+    response = client.post(f"/api/projects/{project_id}/chapters/chap-002/analyze")
+    history = client.get(f"/api/projects/{project_id}/analyses")
+
+    assert response.status_code == 200
+    assert history.json()["analyses"][0]["scope"] == "chapter"
+    assert history.json()["analyses"][0]["chapterId"] == "chap-002"
+    assert history.json()["analyses"][0]["chapterTitle"] == "第二章 唱歌"
+
+
 def fake_analysis(text: str) -> dict:
     if "小星星" in text:
         segments = [

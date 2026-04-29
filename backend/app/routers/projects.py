@@ -11,6 +11,7 @@ from ..services.chapter_service import split_text_into_chapters
 from ..services.project_store import (
     create_project,
     get_project,
+    list_analyses,
     list_projects,
     save_analysis,
     save_song_file,
@@ -53,8 +54,7 @@ async def create_project_from_text_file_endpoint(request: Request) -> dict:
 def analyze_project_endpoint(project_id: str) -> dict:
     project = get_project(project_id)
     analysis = analyze_text(project.text)
-    save_analysis(project_id, analysis)
-    return analysis
+    return save_analysis(project_id, analysis, scope="all")
 
 
 @router.post("/projects/{project_id}/chapters/{chapter_id}/analyze")
@@ -65,7 +65,13 @@ def analyze_project_chapter_endpoint(project_id: str, chapter_id: str) -> dict:
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found.")
 
-    return analyze_text(chapter.text, chapters=[chapter])
+    analysis = analyze_text(chapter.text, chapters=[chapter])
+    return save_analysis(project_id, analysis, scope="chapter", chapter_id=chapter.id, chapter_title=chapter.title)
+
+
+@router.get("/projects/{project_id}/analyses")
+def list_project_analyses_endpoint(project_id: str) -> dict:
+    return {"projectId": project_id, "analyses": list_analyses(project_id)}
 
 
 @router.get("/projects/{project_id}/chapters")

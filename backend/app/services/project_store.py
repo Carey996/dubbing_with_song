@@ -229,10 +229,89 @@ def import_existing_projects() -> None:
                 register_asset(conn, project_id, "song_mp3", root / "song.mp3", created_at)
 
 
-def save_analysis(project_id: str, analysis: dict) -> None:
+def save_analysis(
+    project_id: str,
+    analysis: dict,
+    scope: str = "all",
+    chapter_id: str | None = None,
+    chapter_title: str | None = None,
+) -> dict:
     project = get_project(project_id)
+    now = datetime.now(timezone.utc).isoformat()
+    analysis_id = uuid.uuid4().hex[:12]
+    analysis_dir = project.root / "analysis"
+    result_path = analysis_dir / f"{analysis_id}.json"
+    write_json(result_path, analysis)
     write_json(project.analysis_path, analysis)
     write_json(project.timeline_path, analysis["timeline"])
+
+    segment_count = len(analysis.get("segments") or [])
+    lyric_count = len([segment for segment in analysis.get("segments") or [] if segment.get("type") == "lyric"])
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO analyses(
+              id, project_id, scope, chapter_id, chapter_title, status, engine, result_path,
+              segment_count, lyric_count, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                analysis_id,
+                project_id,
+                scope,
+                chapter_id,
+                chapter_title,
+                analysis.get("analysisEngine"),
+                str(result_path),
+                segment_count,
+                lyric_count,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE projects
+            SET status = 'analyzed', updated_at = ?, current_analysis_id = ?
+            WHERE id = ?
+            """,
+            (now, analysis_id, project_id),
+        )
+        register_asset(conn, project_id, "analysis_json", result_path, now, {"analysisId": analysis_id, "scope": scope})
+        register_asset(conn, project_id, "timeline_json", project.timeline_path, now)
+    return {"id": analysis_id, **analysis}
+
+
+def list_analyses(project_id: str) -> list[dict]:
+    get_project(project_id)
+    initialize_database()
+    with transaction() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM analyses
+            WHERE project_id = ?
+            ORDER BY created_at DESC
+            """,
+            (project_id,),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "projectId": row["project_id"],
+            "scope": row["scope"],
+            "chapterId": row["chapter_id"],
+            "chapterTitle": row["chapter_title"],
+            "status": row["status"],
+            "engine": row["engine"],
+            "segmentCount": row["segment_count"],
+            "lyricCount": row["lyric_count"],
+            "error": row["error"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+        for row in rows
+    ]
 
 
 def save_song_file(project_id: str, filename: str, content: bytes) -> dict:
