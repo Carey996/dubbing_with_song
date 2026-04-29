@@ -26,15 +26,22 @@ BUNDLED_FFMPEG_PATH = BASE_DIR / "tools" / "ffmpeg" / "windows-x64" / "ffmpeg.ex
 
 def render_project(project: Project) -> dict:
     timeline = read_timeline(project)
+    has_song = project.song_path.exists()
+    if has_lyric_segments(timeline) and not has_song:
+        raise HTTPException(
+            status_code=400,
+            detail="歌词片段需要先上传 MP3，再选择歌曲片段开始/结束卡点；后端不会把歌词文本发送给 AI TTS 合成。",
+        )
+
     render_dir = project.output_dir
     chunks_dir = render_dir / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     narration_path = render_dir / "narration.wav"
-    build_narration_track(timeline, chunks_dir, narration_path, include_lyrics=not project.song_path.exists())
+    build_narration_track(timeline, chunks_dir, narration_path, include_lyrics=not has_song)
 
     ffmpeg = find_ffmpeg()
-    if project.song_path.exists() and ffmpeg:
+    if has_song and ffmpeg:
         output_path = render_dir / "mixed.mp3"
         mix_with_song(ffmpeg, narration_path, project.song_path, output_path, timeline)
         return {
@@ -45,7 +52,7 @@ def render_project(project: Project) -> dict:
         }
 
     warnings = []
-    if project.song_path.exists() and not ffmpeg:
+    if has_song and not ffmpeg:
         warnings.append("未检测到 ffmpeg，后端无法混入 MP3，已导出旁白 WAV。")
     return {
         "status": "narration-only",
@@ -82,6 +89,10 @@ def build_narration_track(timeline: dict, chunks_dir: Path, output_path: Path, i
         return
 
     concatenate_wavs(chunk_paths, output_path)
+
+
+def has_lyric_segments(timeline: dict) -> bool:
+    return any(segment.get("type") == "lyric" for segment in timeline.get("segments") or [])
 
 
 def synthesize_wav(text: str, output_path: Path) -> None:
@@ -224,6 +235,7 @@ def build_tts_failure_detail(
     original = str(exc)
     is_openrouter = bool(base_url and "openrouter.ai" in base_url.lower())
     is_provider_404 = getattr(exc, "status_code", None) == 404 or "Error code: 404" in original
+    is_provider_403 = getattr(exc, "status_code", None) == 403 or "Error code: 403" in original
     no_successful_provider = "No successful provider responses" in original
 
     if is_openrouter and is_provider_404 and no_successful_provider:
@@ -233,6 +245,17 @@ def build_tts_failure_detail(
                 "OpenRouter TTS provider returned 404: No successful provider responses. "
                 f"Check TTS_MODEL={model}, TTS_VOICE={voice}, TTS_RESPONSE_FORMAT={response_format}, "
                 "input language support, and OpenRouter key/credits. "
+                f"Original error: {original}"
+            ),
+        )
+
+    if is_openrouter and is_provider_403:
+        return (
+            503,
+            (
+                "OpenRouter TTS provider rejected this input due to provider policy/moderation. "
+                "If the rejected text is a lyric or song-like segment, upload the MP3 and align that lyric segment "
+                "instead of synthesizing it with TTS. "
                 f"Original error: {original}"
             ),
         )
@@ -299,20 +322,24 @@ def concatenate_wavs(paths: list[Path], output_path: Path) -> None:
 def mix_with_song(ffmpeg: str, narration_path: Path, song_path: Path, output_path: Path, timeline: dict) -> None:
     duration = get_wav_duration(narration_path)
     bgm_volume = float(timeline.get("bgmVolume", 0.22) or 0.22)
-    song_start = float(timeline.get("songStartSec", 0.0) or 0.0)
-    filter_graph = (
-        f"[1:a]volume={bgm_volume},atrim=0:{duration:.3f},asetpts=PTS-STARTPTS[bgm];"
-        "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[out]"
-    )
+    lyric_clips = build_lyric_clip_specs(timeline)
+    if lyric_clips:
+        filter_graph = build_lyric_clip_filter_graph(lyric_clips, bgm_volume)
+        song_input_options = []
+    else:
+        song_start = float(timeline.get("songStartSec", 0.0) or 0.0)
+        filter_graph = (
+            f"[1:a]volume={bgm_volume},atrim=0:{duration:.3f},asetpts=PTS-STARTPTS[bgm];"
+            "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[out]"
+        )
+        song_input_options = ["-stream_loop", "-1", "-ss", f"{song_start:.3f}"]
+
     command = [
         ffmpeg,
         "-y",
         "-i",
         str(narration_path),
-        "-stream_loop",
-        "-1",
-        "-ss",
-        f"{song_start:.3f}",
+        *song_input_options,
         "-i",
         str(song_path),
         "-filter_complex",
@@ -328,6 +355,50 @@ def mix_with_song(ffmpeg: str, narration_path: Path, song_path: Path, output_pat
     result = subprocess.run(command, capture_output=True, text=True, timeout=180)
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"ffmpeg render failed: {result.stderr[-800:]}")
+
+
+def build_lyric_clip_specs(timeline: dict) -> list[dict]:
+    specs = []
+    for segment in timeline.get("segments") or []:
+        if segment.get("type") != "lyric":
+            continue
+
+        start_sec = max(0.0, float(segment.get("startSec", 0.0) or 0.0))
+        duration_sec = max(0.1, float(segment.get("durationSec", 0.1) or 0.1))
+        clip_start_sec = max(0.0, float(segment.get("songClipStartSec", 0.0) or 0.0))
+        clip_end_sec = float(segment.get("songClipEndSec", 0.0) or 0.0)
+        clip_duration_sec = clip_end_sec - clip_start_sec if clip_end_sec > clip_start_sec else duration_sec
+        specs.append(
+            {
+                "timelineStartSec": start_sec,
+                "clipStartSec": clip_start_sec,
+                "durationSec": min(duration_sec, max(0.1, clip_duration_sec)),
+            }
+        )
+    return specs
+
+
+def build_lyric_clip_filter_graph(clips: list[dict], bgm_volume: float) -> str:
+    filters = []
+    clip_inputs = []
+    if len(clips) == 1:
+        source_labels = ["[1:a]"]
+    else:
+        split_outputs = "".join(f"[song{i}]" for i in range(len(clips)))
+        filters.append(f"[1:a]asplit={len(clips)}{split_outputs}")
+        source_labels = [f"[song{i}]" for i in range(len(clips))]
+
+    for index, (clip, source_label) in enumerate(zip(clips, source_labels)):
+        output_label = f"[clip{index}]"
+        delay_ms = int(round(clip["timelineStartSec"] * 1000))
+        filters.append(
+            f"{source_label}atrim=start={clip['clipStartSec']:.3f}:duration={clip['durationSec']:.3f},"
+            f"asetpts=PTS-STARTPTS,volume={bgm_volume},adelay={delay_ms}:all=1{output_label}"
+        )
+        clip_inputs.append(output_label)
+
+    filters.append(f"[0:a]{''.join(clip_inputs)}amix=inputs={len(clip_inputs) + 1}:duration=first:dropout_transition=0[out]")
+    return ";".join(filters)
 
 
 def get_wav_duration(path: Path) -> float:

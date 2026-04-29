@@ -170,6 +170,7 @@ textarea {
 }
 
 .audio {
+  min-width: 0;
   width: 100%;
 }
 
@@ -302,6 +303,7 @@ select {
   height: 38px;
   border: 1px solid #c9d2dc;
   border-radius: 8px;
+  min-width: 0;
   padding: 0 10px;
   background: #ffffff;
 }
@@ -440,9 +442,24 @@ input[type="range"] {
 
 .segment-head {
   display: grid;
-  grid-template-columns: 140px minmax(120px, 1fr) 80px 120px;
+  grid-template-columns: minmax(116px, 140px) minmax(0, 1fr) minmax(64px, 80px) minmax(100px, 128px);
   align-items: center;
   gap: 10px;
+}
+
+.segment-head > span,
+.segment-head label {
+  min-width: 0;
+}
+
+.segment-head > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segment-head label input {
+  width: 100%;
 }
 
 .segment textarea {
@@ -451,8 +468,39 @@ input[type="range"] {
 
 .lyric-controls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(140px, 1fr));
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
   gap: 12px;
+}
+
+.lyric-song-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(240px, 1.2fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.file-picker.compact {
+  min-height: 38px;
+}
+
+.file-picker.compact span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cue-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.cue-input-row button {
+  min-height: 38px;
+  padding: 0 10px;
+  white-space: nowrap;
 }
 
 .notice {
@@ -495,7 +543,9 @@ input[type="range"] {
   }
 
   .workspace-grid,
-  .mix-controls {
+  .mix-controls,
+  .lyric-controls,
+  .lyric-song-panel {
     grid-template-columns: 1fr;
   }
 

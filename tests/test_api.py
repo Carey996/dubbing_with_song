@@ -175,6 +175,80 @@ def test_render_result_is_persisted_with_history(monkeypatch):
     assert detail.json()["latestRender"]["message"] == "测试生成完成。"
 
 
+def test_render_requires_uploaded_song_for_lyric_segments(monkeypatch):
+    project_id = client.post("/api/projects", json={"text": "第一章\n她开始唱歌。"}).json()["id"]
+    timeline = {
+        "bgmVolume": 0.5,
+        "narrationVolume": 1,
+        "songStartSec": 0,
+        "segments": [
+            {
+                "id": "seg-001",
+                "index": 0,
+                "type": "lyric",
+                "text": "一闪一闪亮晶晶",
+                "startSec": 0,
+                "durationSec": 4,
+                "confidence": 0.9,
+                "reason": "测试歌词",
+                "songClipStartSec": 12,
+                "songClipEndSec": 16,
+            }
+        ],
+    }
+    client.patch(f"/api/projects/{project_id}/timeline", json=timeline)
+    monkeypatch.setattr(renderer, "synthesize_wav", lambda *_args, **_kwargs: pytest.fail("lyrics must not be sent to TTS"))
+
+    response = client.post(f"/api/projects/{project_id}/render")
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "歌词片段" in detail
+    assert "MP3" in detail
+
+
+def test_mix_with_song_uses_lyric_segment_clip_cues(monkeypatch, tmp_path):
+    narration_path = tmp_path / "narration.wav"
+    song_path = tmp_path / "song.mp3"
+    output_path = tmp_path / "mixed.mp3"
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(renderer, "get_wav_duration", lambda _path: 8.0)
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+
+    renderer.mix_with_song(
+        "ffmpeg.exe",
+        narration_path,
+        song_path,
+        output_path,
+        {
+            "bgmVolume": 0.42,
+            "songStartSec": 0,
+            "segments": [
+                {
+                    "id": "seg-001",
+                    "type": "lyric",
+                    "startSec": 2.5,
+                    "durationSec": 3,
+                    "songClipStartSec": 10,
+                    "songClipEndSec": 13,
+                }
+            ],
+        },
+    )
+
+    command = captured["command"]
+    filter_graph = command[command.index("-filter_complex") + 1]
+    assert "atrim=start=10.000:duration=3.000" in filter_graph
+    assert "volume=0.42" in filter_graph
+    assert "adelay=2500:all=1" in filter_graph
+
+
 def fake_analysis(text: str) -> dict:
     if "小星星" in text:
         segments = [
@@ -440,12 +514,17 @@ def test_lyric_detection_and_timeline_update(monkeypatch):
 
 def test_song_upload_accepts_mp3_file():
     project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    content = b"ID3\x03\x00\x00\x00\x00\x00\x00"
     uploaded = client.post(
         f"/api/projects/{project_id}/song-file",
-        files={"file": ("demo.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00", "audio/mpeg")},
+        files={"file": ("demo.mp3", content, "audio/mpeg")},
     )
+    downloaded = client.get(f"/api/projects/{project_id}/song-file")
+
     assert uploaded.status_code == 200
     assert uploaded.json()["filename"] == "demo.mp3"
+    assert downloaded.status_code == 200
+    assert downloaded.content == content
 
 
 def test_find_ffmpeg_prefers_bundled_path(monkeypatch):
@@ -695,6 +774,34 @@ def test_openrouter_provider_404_has_actionable_detail(monkeypatch):
     assert "OpenRouter TTS provider returned 404" in detail
     assert "TTS_MODEL=openai/gpt-4o-mini-tts-2025-12-15" in detail
     assert "No successful provider responses" in detail
+
+
+def test_openrouter_provider_403_has_actionable_detail(monkeypatch):
+    class FakeOpenRouterError(Exception):
+        status_code = 403
+
+        def __str__(self):
+            return "Error code: 403 - {'error': {'message': 'The request is prohibited due to a violation of provider Terms Of Service.', 'code': 403}}"
+
+    class FakeSpeech:
+        def create(self, **kwargs):
+            raise FakeOpenRouterError()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.audio = type("Audio", (), {"speech": FakeSpeech()})()
+
+    monkeypatch.setenv("TTS_PROVIDER", "openrouter")
+    monkeypatch.setenv("TTS_API_KEY", "openrouter-key")
+    monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
+
+    with pytest.raises(HTTPException) as exc:
+        renderer.synthesize_wav("English narration.", TEST_TMP_DIR / "openrouter-403.wav")
+
+    assert exc.value.status_code == 503
+    detail = str(exc.value.detail)
+    assert "OpenRouter TTS provider rejected this input" in detail
+    assert "lyric" in detail
 
 
 def test_synthesize_wav_requires_ai_tts_config(monkeypatch):

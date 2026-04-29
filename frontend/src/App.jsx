@@ -27,6 +27,8 @@ function App() {
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisProgressVisible, setAnalysisProgressVisible] = useState(false);
   const [analysisTargetLabel, setAnalysisTargetLabel] = useState('');
+  const [songDurationSec, setSongDurationSec] = useState(0);
+  const [songCursorSec, setSongCursorSec] = useState(0);
 
   const totals = useMemo(() => {
     const duration = timeline.segments.reduce((sum, segment) => sum + Number(segment.durationSec || 0), 0);
@@ -40,6 +42,13 @@ function App() {
   );
   const previewChapter = selectedChapter || chapters[0] || null;
   const isAnalyzing = busy === 'analyzing';
+  const localSongUrl = useMemo(() => (songFile ? URL.createObjectURL(songFile) : ''), [songFile]);
+  const uploadedSongUrl = useMemo(() => {
+    if (!project?.hasSong) return '';
+    const version = encodeURIComponent(project.updatedAt || project.id);
+    return `/api/projects/${project.id}/song-file?v=${version}`;
+  }, [project]);
+  const songAudioUrl = localSongUrl || uploadedSongUrl;
   const analysisPhase = useMemo(() => {
     if (analysisProgress >= 100) return '分析完成，正在刷新结果';
     if (analysisProgress >= 72) return '生成时间轴与歌词候选';
@@ -60,6 +69,12 @@ function App() {
   useEffect(() => {
     loadProjectList();
   }, []);
+
+  useEffect(() => (
+    () => {
+      if (localSongUrl) URL.revokeObjectURL(localSongUrl);
+    }
+  ), [localSongUrl]);
 
   function applyChapters(nextChapters) {
     setChapters(nextChapters);
@@ -243,6 +258,32 @@ function App() {
     }));
   }
 
+  function setCueFromPlayback(segment, field) {
+    const cue = roundSeconds(songCursorSec);
+    updateSegment(segment.id, normalizeCuePatch(segment, field, cue));
+  }
+
+  function normalizeCuePatch(segment, field, cue) {
+    const patch = { [field]: cue };
+    if (field === 'songClipStartSec' && Number(segment.songClipEndSec || 0) <= cue) {
+      patch.songClipEndSec = roundSeconds(cue + Number(segment.durationSec || 0.5));
+    }
+    if (field === 'songClipEndSec' && Number(segment.songClipStartSec || 0) > cue) {
+      patch.songClipStartSec = cue;
+    }
+    return patch;
+  }
+
+  function getCueMax(segment) {
+    return Math.max(
+      10,
+      Number(songDurationSec || 0),
+      Number(segment.songClipStartSec || 0),
+      Number(segment.songClipEndSec || 0),
+      Number(segment.durationSec || 0),
+    );
+  }
+
   function previewNarration() {
     if (!window.speechSynthesis) return;
     window.speechSynthesis.cancel();
@@ -345,7 +386,16 @@ function App() {
             <Upload size={18} />
             上传 MP3
           </button>
-          {songFile && <audio className="audio" src={URL.createObjectURL(songFile)} controls />}
+          {songAudioUrl && (
+            <audio
+              className="audio"
+              src={songAudioUrl}
+              controls
+              preload="metadata"
+              onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
+              onTimeUpdate={(event) => setSongCursorSec(roundSeconds(event.currentTarget.currentTime || 0))}
+            />
+          )}
         </aside>
 
         <section className="main-panel">
@@ -466,11 +516,50 @@ function App() {
                 <textarea value={segment.text} onChange={(event) => updateSegment(segment.id, { text: event.target.value })} />
                 {segment.type === 'lyric' && (
                   <div className="lyric-controls">
+                    <div className="lyric-song-panel">
+                      <label className="file-picker compact">
+                        <FileAudio size={18} />
+                        <span>{songFile ? songFile.name : project?.hasSong ? '替换 MP3' : '选择 MP3'}</span>
+                        <input
+                          type="file"
+                          accept=".mp3,audio/mpeg"
+                          onChange={(event) => setSongFile(event.target.files?.[0] || null)}
+                        />
+                      </label>
+                      <button onClick={uploadSong} disabled={busy || !project || !songFile}>
+                        <Upload size={18} />
+                        上传
+                      </button>
+                      {songAudioUrl && (
+                        <audio
+                          className="audio"
+                          src={songAudioUrl}
+                          controls
+                          preload="metadata"
+                          onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
+                          onTimeUpdate={(event) => setSongCursorSec(roundSeconds(event.currentTarget.currentTime || 0))}
+                        />
+                      )}
+                    </div>
                     <label>
                       歌曲片段开始
+                      <div className="cue-input-row">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={segment.songClipStartSec}
+                          onChange={(event) => updateSegment(segment.id, { songClipStartSec: Number(event.target.value) })}
+                        />
+                        <button type="button" onClick={() => setCueFromPlayback(segment, 'songClipStartSec')} disabled={!songAudioUrl}>
+                          <Music size={16} />
+                          当前
+                        </button>
+                      </div>
                       <input
-                        type="number"
+                        type="range"
                         min="0"
+                        max={getCueMax(segment)}
                         step="0.1"
                         value={segment.songClipStartSec}
                         onChange={(event) => updateSegment(segment.id, { songClipStartSec: Number(event.target.value) })}
@@ -478,9 +567,23 @@ function App() {
                     </label>
                     <label>
                       歌曲片段结束
+                      <div className="cue-input-row">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={segment.songClipEndSec}
+                          onChange={(event) => updateSegment(segment.id, { songClipEndSec: Number(event.target.value) })}
+                        />
+                        <button type="button" onClick={() => setCueFromPlayback(segment, 'songClipEndSec')} disabled={!songAudioUrl}>
+                          <Music size={16} />
+                          当前
+                        </button>
+                      </div>
                       <input
-                        type="number"
+                        type="range"
                         min="0"
+                        max={getCueMax(segment)}
                         step="0.1"
                         value={segment.songClipEndSec}
                         onChange={(event) => updateSegment(segment.id, { songClipEndSec: Number(event.target.value) })}
@@ -513,6 +616,12 @@ function PanelTitle({ icon, title }) {
       <h2>{title}</h2>
     </div>
   );
+}
+
+function roundSeconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.round(numeric * 10) / 10);
 }
 
 async function request(url, options = {}) {

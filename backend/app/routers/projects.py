@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from starlette.responses import FileResponse
 from starlette.datastructures import UploadFile
 
 from ..services.analyzer import analyze_text
@@ -102,6 +103,15 @@ async def upload_song_endpoint(project_id: str, request: Request) -> dict:
 
     song = save_song_file(project.id, filename, await upload.read())
     return song
+
+
+@router.get("/projects/{project_id}/song-file")
+def get_song_endpoint(project_id: str) -> FileResponse:
+    project = get_project(project_id)
+    if not project.song_path.exists():
+        raise HTTPException(status_code=404, detail="Song file not found.")
+
+    return FileResponse(project.song_path, media_type="audio/mpeg", filename="song.mp3")
 
 
 @router.patch("/projects/{project_id}/timeline")
