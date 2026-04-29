@@ -20,6 +20,11 @@ class LlmSegment(BaseModel):
     text: str = Field(description="Original text for this segment.")
     confidence: float = Field(default=0.6, ge=0.0, le=1.0, description="Confidence for the segment classification.")
     reason: str = Field(default="LLM 未提供原因", description="Short Chinese explanation for the classification.")
+    speakerName: str = Field(default="旁白", description="Speaker or narrator name for voice continuity.")
+    speakerGender: Literal["male", "female", "unknown"] = Field(default="unknown", description="Inferred speaker gender.")
+    emotion: str = Field(default="neutral", description="Dominant emotion for delivery.")
+    voiceStyle: str = Field(default="neutral_narrator", description="Stable style key for this speaker.")
+    delivery: str = Field(default="自然清晰，保持中文有声书旁白节奏。", description="Chinese delivery guidance for TTS.")
     durationSec: float | None = Field(default=None, ge=0.5, description="Recommended duration in seconds.")
     songClipStartSec: float | None = Field(default=None, ge=0.0, description="Optional song clip start time.")
     songClipEndSec: float | None = Field(default=None, ge=0.0, description="Optional song clip end time.")
@@ -98,6 +103,12 @@ def build_prompt(chat_prompt_template, format_instructions: str):
                         "每个分块最多输出 12 个 segments；连续 narration 尽量合并为 2 到 5 句话一段。",
                         "只有真实歌曲歌词、歌名提示、明确在唱歌且可用歌曲片段替换的内容，才能标为 lyric。",
                         "观众喊话、辱骂、口号、弹幕、普通台词、角色对白都必须标为 narration，不能标为 lyric。",
+                        "为每个 segment 识别说话人和配音提示：speakerName、speakerGender、emotion、voiceStyle、delivery。",
+                        "speakerName 用角色名；无法确定角色时用 旁白。同一角色在同一分块内必须使用相同 speakerName 和 voiceStyle。",
+                        "speakerGender 只能是 male、female 或 unknown；不确定时用 unknown，不能臆造性别。",
+                        "emotion 用简短英文标签，例如 neutral、tense、angry、sad、gentle、excited、fearful、happy。",
+                        "voiceStyle 用稳定英文下划线 key，例如 neutral_narrator、young_female_soft、young_male_bright、middle_male_deep。",
+                        "delivery 用一句中文描述朗读方式，说明语速、音量、停顿、情绪强弱；不要改写正文。",
                         "如果能从歌词或书名号推测歌曲，给 songCandidates；不确定时用 待确认歌曲/待确认歌手。",
                         "durationSec 需要给前端默认时间轴使用；中文旁白按自然语速估算，歌词至少 4 秒。",
                         "confidence 和 reason 必须为每个 segment 提供；如果不确定，confidence 用 0.6。",
@@ -122,6 +133,11 @@ def get_format_instructions() -> str:
       "text": "原文片段",
       "confidence": 0.0 到 1.0,
       "reason": "简短中文原因",
+      "speakerName": "角色名；无法确定时用旁白",
+      "speakerGender": "male、female 或 unknown",
+      "emotion": "neutral、tense、angry、sad、gentle、excited、fearful、happy 等短标签",
+      "voiceStyle": "稳定英文下划线音色风格 key，例如 young_female_soft",
+      "delivery": "一句中文朗读指导，说明语速、音量、停顿、情绪强弱",
       "durationSec": 秒数,
       "songClipStartSec": 0,
       "songClipEndSec": 秒数
@@ -363,6 +379,11 @@ def normalize_llm_analysis(
                 "durationSec": duration,
                 "confidence": round(float(item.confidence), 3),
                 "reason": item.reason or "LLM 分析",
+                "speakerName": normalize_segment_label(item.speakerName, "旁白"),
+                "speakerGender": item.speakerGender if item.speakerGender in {"male", "female", "unknown"} else "unknown",
+                "emotion": normalize_segment_label(item.emotion, "neutral"),
+                "voiceStyle": normalize_segment_label(item.voiceStyle, "neutral_narrator"),
+                "delivery": normalize_segment_label(item.delivery, "自然清晰，保持中文有声书旁白节奏。"),
                 "songClipStartSec": round(song_clip_start, 2),
                 "songClipEndSec": round(max(song_clip_start, song_clip_end), 2),
             }
@@ -400,6 +421,11 @@ def build_analysis(segments: list[dict], candidates: list[dict], engine: str, ch
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\r\n?", "\n", text or "").strip()
+
+
+def normalize_segment_label(value: str | None, fallback: str) -> str:
+    normalized = normalize_text(value or "")
+    return normalized or fallback
 
 
 def estimate_duration(text: str, kind: str) -> float:

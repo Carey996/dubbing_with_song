@@ -330,6 +330,7 @@ textarea {
 }
 
 input[type="number"],
+input[type="text"],
 select {
   height: 38px;
   border: 1px solid #c9d2dc;
@@ -490,6 +491,27 @@ input[type="range"] {
 }
 
 .segment-head label input {
+  width: 100%;
+}
+
+.voice-controls {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(96px, 120px) minmax(110px, 140px) minmax(150px, 1fr);
+  gap: 10px;
+}
+
+.voice-controls label,
+.delivery-control {
+  color: #405365;
+  font-size: 13px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.voice-controls input,
+.voice-controls select,
+.delivery-control input {
   width: 100%;
 }
 
@@ -685,6 +707,7 @@ input[type="range"] {
 
   .workspace-grid,
   .mix-controls,
+  .voice-controls,
   .lyric-controls,
   .lyric-song-panel,
   .history-card {

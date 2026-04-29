@@ -42,6 +42,18 @@ TTS_INSTRUCTIONS=用克制但带紧张感的悬疑旁白朗读，保留自然停
 
 如果某个 TTS 服务不支持 instructions，或你想让模型只读原文，可以把它设成空白值关闭。
 
+AI 分析会为每个片段补充 `speakerName`、`speakerGender`、`emotion`、`voiceStyle` 和 `delivery`。渲染时后端会把这些逐段写入 speech API 的配音提示；如果使用 Gemini TTS，还会把部分情绪转换成 inline style tags 放进输入文本。需要按男女声或角色区分 provider voice 时，可以配置：
+
+```env
+TTS_VOICE_MALE=onyx
+TTS_VOICE_FEMALE=nova
+TTS_VOICE_UNKNOWN=alloy
+TTS_VOICE_POOL_MALE=onyx,echo
+TTS_VOICE_POOL_FEMALE=nova,shimmer
+```
+
+如果配置了 `TTS_VOICE_POOL_*`，同一说话人会稳定映射到同一个 voice；未配置时按 `TTS_VOICE_MALE` / `TTS_VOICE_FEMALE` / `TTS_VOICE_UNKNOWN` 回退，再回到通用 `TTS_VOICE`。
+
 如果正文是中文旁白，不要把 `TTS_MODEL` 配成 `mistralai/voxtral-*`。后端会在中文输入 + Voxtral TTS 组合下直接返回配置错误，避免等到 OpenRouter provider 侧报 `No successful provider responses`。
 
 项目已内置 Windows x64 版 `ffmpeg`，默认路径是 `tools\ffmpeg\windows-x64\ffmpeg.exe`，无需额外安装。需要临时切换时，可以显式配置：

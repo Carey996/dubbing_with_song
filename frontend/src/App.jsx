@@ -593,6 +593,51 @@ function App() {
                     />
                   </label>
                 </div>
+                <div className="voice-controls">
+                  <label>
+                    说话人
+                    <input
+                      type="text"
+                      value={segment.speakerName || '旁白'}
+                      onChange={(event) => updateSegment(segment.id, { speakerName: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    性别
+                    <select
+                      value={segment.speakerGender || 'unknown'}
+                      onChange={(event) => updateSegment(segment.id, { speakerGender: event.target.value })}
+                    >
+                      <option value="unknown">未知</option>
+                      <option value="female">女声</option>
+                      <option value="male">男声</option>
+                    </select>
+                  </label>
+                  <label>
+                    情绪
+                    <input
+                      type="text"
+                      value={segment.emotion || 'neutral'}
+                      onChange={(event) => updateSegment(segment.id, { emotion: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    音色
+                    <input
+                      type="text"
+                      value={segment.voiceStyle || 'neutral_narrator'}
+                      onChange={(event) => updateSegment(segment.id, { voiceStyle: event.target.value })}
+                    />
+                  </label>
+                </div>
+                <label className="delivery-control">
+                  朗读方式
+                  <input
+                    type="text"
+                    value={segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}
+                    onChange={(event) => updateSegment(segment.id, { delivery: event.target.value })}
+                  />
+                </label>
                 <textarea value={segment.text} onChange={(event) => updateSegment(segment.id, { text: event.target.value })} />
                 {segment.type === 'lyric' && (
                   <div className="lyric-controls">

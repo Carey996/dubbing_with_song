@@ -78,7 +78,7 @@ def build_narration_track(timeline: dict, chunks_dir: Path, output_path: Path, i
                 sample_template = (1, 2, 22050)
             create_silence_wav(chunk_path, duration, sample_template)
         else:
-            synthesize_wav(text, chunk_path)
+            synthesize_wav(text, chunk_path, segment=segment)
             with wave.open(str(chunk_path), "rb") as wav:
                 sample_template = (wav.getnchannels(), wav.getsampwidth(), wav.getframerate())
 
@@ -95,29 +95,30 @@ def has_lyric_segments(timeline: dict) -> bool:
     return any(segment.get("type") == "lyric" for segment in timeline.get("segments") or [])
 
 
-def synthesize_wav(text: str, output_path: Path) -> None:
+def synthesize_wav(text: str, output_path: Path, segment: dict | None = None) -> None:
     provider = os.getenv("TTS_PROVIDER", "openrouter").strip().lower()
     if provider == "openrouter":
-        synthesize_wav_with_openrouter(text, output_path)
+        synthesize_wav_with_openrouter(text, output_path, segment=segment)
         return
     if provider == "openai":
-        synthesize_wav_with_openai(text, output_path)
+        synthesize_wav_with_openai(text, output_path, segment=segment)
         return
 
     raise HTTPException(status_code=503, detail=f"Unsupported TTS_PROVIDER: {provider}. Use openrouter or openai.")
 
 
-def synthesize_wav_with_openai(text: str, output_path: Path) -> None:
+def synthesize_wav_with_openai(text: str, output_path: Path, segment: dict | None = None) -> None:
     synthesize_audio_with_openai_compatible(
         text=text,
         output_path=output_path,
         default_base_url=None,
         default_model=DEFAULT_TTS_MODEL,
         response_format="wav",
+        segment=segment,
     )
 
 
-def synthesize_wav_with_openrouter(text: str, output_path: Path) -> None:
+def synthesize_wav_with_openrouter(text: str, output_path: Path, segment: dict | None = None) -> None:
     mp3_path = output_path.with_suffix(".mp3")
     response_format = os.getenv("TTS_RESPONSE_FORMAT", "mp3").strip().lower()
     if response_format != "mp3":
@@ -132,6 +133,7 @@ def synthesize_wav_with_openrouter(text: str, output_path: Path) -> None:
         default_base_url=DEFAULT_OPENROUTER_TTS_BASE_URL,
         default_model=model,
         response_format=response_format,
+        segment=segment,
     )
 
     ffmpeg = find_ffmpeg()
@@ -149,6 +151,7 @@ def synthesize_audio_with_openai_compatible(
     default_base_url: str | None,
     default_model: str,
     response_format: str,
+    segment: dict | None = None,
 ) -> None:
     api_key = require_tts_api_key()
 
@@ -159,15 +162,15 @@ def synthesize_audio_with_openai_compatible(
 
     client = OpenAI(**client_kwargs)
     model = get_tts_model(default_model)
-    voice = os.getenv("TTS_VOICE", DEFAULT_TTS_VOICE)
+    voice = get_tts_voice(segment)
     request_kwargs = {
         "model": model,
         "voice": voice,
-        "input": text or " ",
+        "input": build_tts_input(text or " ", model, segment),
         "response_format": response_format,
         "speed": float(os.getenv("TTS_SPEED", "1.0")),
     }
-    instructions = get_tts_instructions()
+    instructions = build_tts_instructions(segment)
     if instructions:
         request_kwargs["instructions"] = instructions
 
@@ -206,6 +209,90 @@ def get_tts_instructions() -> str | None:
         return DEFAULT_TTS_INSTRUCTIONS
     normalized = configured.strip()
     return normalized or None
+
+
+def build_tts_instructions(segment: dict | None = None) -> str | None:
+    base = get_tts_instructions()
+    if not segment:
+        return base
+    if base is None:
+        return None
+
+    details = [
+        f"当前片段说话人：{normalize_segment_value(segment.get('speakerName'), '旁白')}",
+        f"说话人性别：{normalize_segment_value(segment.get('speakerGender'), 'unknown')}",
+        f"情绪：{normalize_segment_value(segment.get('emotion'), 'neutral')}",
+        f"音色风格：{normalize_segment_value(segment.get('voiceStyle'), 'neutral_narrator')}",
+        f"朗读方式：{normalize_segment_value(segment.get('delivery'), '自然清晰，保持中文有声书旁白节奏。')}",
+        "保持同一说话人的声音一致；不要读出这些配音提示，只朗读正文。",
+    ]
+    return "\n".join([base, *details])
+
+
+def build_tts_input(text: str, model: str, segment: dict | None = None) -> str:
+    if not segment or not is_gemini_tts_model(model) or tts_style_explicitly_disabled():
+        return text
+
+    tags = get_gemini_style_tags(segment)
+    if not tags:
+        return text
+    return f"{' '.join(tags)} {text}"
+
+
+def tts_style_explicitly_disabled() -> bool:
+    configured = os.getenv("TTS_INSTRUCTIONS")
+    return configured is not None and not configured.strip()
+
+
+def get_tts_voice(segment: dict | None = None) -> str:
+    default_voice = os.getenv("TTS_VOICE", DEFAULT_TTS_VOICE).strip() or DEFAULT_TTS_VOICE
+    if not segment:
+        return default_voice
+
+    gender = normalize_segment_value(segment.get("speakerGender"), "unknown").lower()
+    speaker_name = normalize_segment_value(segment.get("speakerName"), "旁白")
+    pool = get_voice_pool(gender)
+    if pool:
+        return pool[sum(ord(char) for char in speaker_name) % len(pool)]
+
+    gender_env = {
+        "male": "TTS_VOICE_MALE",
+        "female": "TTS_VOICE_FEMALE",
+        "unknown": "TTS_VOICE_UNKNOWN",
+    }.get(gender, "TTS_VOICE_UNKNOWN")
+    configured = os.getenv(gender_env)
+    return configured.strip() if configured and configured.strip() else default_voice
+
+
+def get_voice_pool(gender: str) -> list[str]:
+    env_name = {
+        "male": "TTS_VOICE_POOL_MALE",
+        "female": "TTS_VOICE_POOL_FEMALE",
+        "unknown": "TTS_VOICE_POOL_UNKNOWN",
+    }.get(gender, "TTS_VOICE_POOL_UNKNOWN")
+    configured = os.getenv(env_name, "")
+    return [item.strip() for item in configured.split(",") if item.strip()]
+
+
+def is_gemini_tts_model(model: str) -> bool:
+    normalized = (model or "").lower()
+    return "gemini" in normalized and "tts" in normalized
+
+
+def get_gemini_style_tags(segment: dict) -> list[str]:
+    emotion = normalize_segment_value(segment.get("emotion"), "neutral").lower()
+    delivery = normalize_segment_value(segment.get("delivery"), "").lower()
+    tags = []
+    if emotion in {"angry", "excited", "sad"}:
+        tags.append(f"[{emotion}]")
+    if emotion in {"tense", "fearful", "gentle"} or "低声" in delivery or "压低" in delivery:
+        tags.append("[whispers]")
+    return tags[:2]
+
+
+def normalize_segment_value(value, fallback: str) -> str:
+    normalized = str(value or "").strip()
+    return normalized or fallback
 
 
 def validate_openrouter_tts_request(text: str, model: str) -> None:
