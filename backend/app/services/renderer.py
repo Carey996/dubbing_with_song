@@ -107,11 +107,14 @@ def synthesize_wav_with_openrouter(text: str, output_path: Path) -> None:
     if response_format != "mp3":
         raise HTTPException(status_code=503, detail="OpenRouter TTS currently requires TTS_RESPONSE_FORMAT=mp3 so ffmpeg can convert it to WAV.")
 
+    require_tts_api_key()
+    model = get_tts_model(DEFAULT_OPENROUTER_TTS_MODEL)
+    validate_openrouter_tts_request(text, model)
     synthesize_audio_with_openai_compatible(
         text=text,
         output_path=mp3_path,
         default_base_url=DEFAULT_OPENROUTER_TTS_BASE_URL,
-        default_model=DEFAULT_OPENROUTER_TTS_MODEL,
+        default_model=model,
         response_format=response_format,
     )
 
@@ -131,9 +134,7 @@ def synthesize_audio_with_openai_compatible(
     default_model: str,
     response_format: str,
 ) -> None:
-    api_key = os.getenv("TTS_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=503, detail="Missing required TTS config: TTS_API_KEY. Set it in .env.")
+    api_key = require_tts_api_key()
 
     client_kwargs = {"api_key": api_key}
     base_url = os.getenv("TTS_BASE_URL") or default_base_url
@@ -141,10 +142,12 @@ def synthesize_audio_with_openai_compatible(
         client_kwargs["base_url"] = base_url
 
     client = OpenAI(**client_kwargs)
+    model = get_tts_model(default_model)
+    voice = os.getenv("TTS_VOICE", DEFAULT_TTS_VOICE)
     try:
         response = client.audio.speech.create(
-            model=os.getenv("TTS_MODEL", default_model),
-            voice=os.getenv("TTS_VOICE", DEFAULT_TTS_VOICE),
+            model=model,
+            voice=voice,
             input=text or " ",
             response_format=response_format,
             speed=float(os.getenv("TTS_SPEED", "1.0")),
@@ -152,10 +155,71 @@ def synthesize_audio_with_openai_compatible(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         response.write_to_file(output_path)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"AI TTS failed: {exc}") from exc
+        status_code, detail = build_tts_failure_detail(
+            exc=exc,
+            base_url=base_url,
+            model=model,
+            voice=voice,
+            response_format=response_format,
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise HTTPException(status_code=502, detail="AI TTS returned an empty audio file.")
+
+
+def require_tts_api_key() -> str:
+    api_key = os.getenv("TTS_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Missing required TTS config: TTS_API_KEY. Set it in .env.")
+    return api_key
+
+
+def get_tts_model(default_model: str) -> str:
+    return os.getenv("TTS_MODEL", default_model).strip() or default_model
+
+
+def validate_openrouter_tts_request(text: str, model: str) -> None:
+    normalized_model = model.lower()
+    if normalized_model.startswith("mistralai/voxtral") and contains_cjk(text):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"OpenRouter TTS config is not suitable for Chinese narration: TTS_MODEL={model}. "
+                "Voxtral TTS is likely to fail for 中文 input; choose a speech model that supports Chinese, "
+                "or switch TTS_PROVIDER to another configured TTS service."
+            ),
+        )
+
+
+def contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text or "")
+
+
+def build_tts_failure_detail(
+    exc: Exception,
+    base_url: str | None,
+    model: str,
+    voice: str,
+    response_format: str,
+) -> tuple[int, str]:
+    original = str(exc)
+    is_openrouter = bool(base_url and "openrouter.ai" in base_url.lower())
+    is_provider_404 = getattr(exc, "status_code", None) == 404 or "Error code: 404" in original
+    no_successful_provider = "No successful provider responses" in original
+
+    if is_openrouter and is_provider_404 and no_successful_provider:
+        return (
+            503,
+            (
+                "OpenRouter TTS provider returned 404: No successful provider responses. "
+                f"Check TTS_MODEL={model}, TTS_VOICE={voice}, TTS_RESPONSE_FORMAT={response_format}, "
+                "input language support, and OpenRouter key/credits. "
+                f"Original error: {original}"
+            ),
+        )
+
+    return 502, f"AI TTS failed: {original}"
 
 
 def find_ffmpeg() -> str | None:
