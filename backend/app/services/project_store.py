@@ -39,9 +39,14 @@ class Project:
 
     @property
     def output_dir(self) -> Path:
-        output_dir = OUTPUTS_DIR / self.id
+        render_id = self.metadata.get("renderId")
+        output_dir = OUTPUTS_DIR / self.id / render_id if render_id else OUTPUTS_DIR / self.id
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
+
+    def output_url(self, path: Path) -> str:
+        relative = path.relative_to(OUTPUTS_DIR).as_posix()
+        return f"/outputs/{relative}"
 
     def public_dict(self, include_text: bool = False) -> dict:
         latest_render = project_repository.get_latest_render(self.id)
@@ -204,6 +209,8 @@ def save_song_file(project_id: str, filename: str, content: bytes) -> dict:
         "url": f"/api/projects/{project_id}/song-file",
     }
     write_json(project.root / "song.json", song)
+    now = datetime.now(timezone.utc).isoformat()
+    project_repository.mark_song_uploaded(project_id, project.song_path, now, song)
     return song
 
 
@@ -216,7 +223,43 @@ def save_timeline(project_id: str, payload: dict) -> dict:
         "segments": normalize_segments(payload.get("segments") or []),
     }
     write_json(project.timeline_path, timeline)
+    now = datetime.now(timezone.utc).isoformat()
+    project_repository.mark_timeline_saved(project_id, project.timeline_path, now)
     return timeline
+
+
+def create_render_record(project_id: str) -> str:
+    get_project(project_id)
+    now = datetime.now(timezone.utc).isoformat()
+    return project_repository.create_render_record(project_id, now)
+
+
+def complete_render_record(project_id: str, render_id: str, result: dict) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    output_path = output_url_to_path(result.get("outputUrl") or "")
+    return project_repository.complete_render_record(project_id, render_id, result, output_path, now)
+
+
+def fail_render_record(project_id: str, render_id: str, error: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    project_repository.fail_render_record(project_id, render_id, error, now)
+
+
+def list_renders(project_id: str) -> list[dict]:
+    get_project(project_id)
+    return project_repository.list_renders(project_id)
+
+
+def output_url_to_path(output_url: str) -> Path | None:
+    prefix = "/outputs/"
+    if not output_url.startswith(prefix):
+        return None
+    relative = output_url.removeprefix(prefix)
+    path = (OUTPUTS_DIR / relative).resolve()
+    outputs_root = OUTPUTS_DIR.resolve()
+    if outputs_root not in path.parents and path != outputs_root:
+        return None
+    return path
 
 
 def read_timeline(project: Project) -> dict:

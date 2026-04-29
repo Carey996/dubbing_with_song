@@ -9,10 +9,14 @@ from starlette.datastructures import UploadFile
 from ..services.analyzer import analyze_text
 from ..services.chapter_service import split_text_into_chapters
 from ..services.project_store import (
+    complete_render_record,
     create_project,
+    create_render_record,
+    fail_render_record,
     get_project,
     list_analyses,
     list_projects,
+    list_renders,
     save_analysis,
     save_song_file,
     save_timeline,
@@ -110,9 +114,23 @@ async def update_timeline_endpoint(project_id: str, request: Request) -> dict:
 
 @router.post("/projects/{project_id}/render")
 def render_project_endpoint(project_id: str) -> dict:
+    render_id = create_render_record(project_id)
     project = get_project(project_id)
-    result = render_project(project)
-    return result
+    project.metadata["renderId"] = render_id
+    try:
+        result = render_project(project)
+    except HTTPException as exc:
+        fail_render_record(project_id, render_id, str(exc.detail))
+        raise
+    except Exception as exc:
+        fail_render_record(project_id, render_id, str(exc))
+        raise
+    return complete_render_record(project_id, render_id, result)
+
+
+@router.get("/projects/{project_id}/renders")
+def list_project_renders_endpoint(project_id: str) -> dict:
+    return {"projectId": project_id, "renders": list_renders(project_id)}
 
 
 @router.get("/projects/{project_id}")

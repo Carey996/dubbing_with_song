@@ -127,6 +127,54 @@ def test_chapter_analysis_is_persisted_with_scope(monkeypatch):
     assert history.json()["analyses"][0]["chapterTitle"] == "第二章 唱歌"
 
 
+def test_song_and_timeline_updates_are_reflected_in_project_list(monkeypatch):
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    timeline = client.post(f"/api/projects/{project_id}/analyze").json()["timeline"]
+    timeline["bgmVolume"] = 0.42
+    client.patch(f"/api/projects/{project_id}/timeline", json=timeline)
+    client.post(
+        f"/api/projects/{project_id}/song-file",
+        files={"file": ("demo.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00", "audio/mpeg")},
+    )
+
+    listed = client.get("/api/projects").json()["projects"]
+    item = next(row for row in listed if row["id"] == project_id)
+    detail = client.get(f"/api/projects/{project_id}").json()
+
+    assert item["hasSong"] is True
+    assert item["hasTimeline"] is True
+    assert detail["timeline"]["bgmVolume"] == 0.42
+
+
+def test_render_result_is_persisted_with_history(monkeypatch):
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    client.post(f"/api/projects/{project_id}/analyze")
+
+    def fake_render(project):
+        output_dir = project.output_dir
+        output_path = output_dir / "narration.wav"
+        output_path.write_bytes(b"RIFFfakeWAVE")
+        return {
+            "status": "narration-only",
+            "message": "测试生成完成。",
+            "outputUrl": project.output_url(output_path),
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(projects, "render_project", fake_render)
+    rendered = client.post(f"/api/projects/{project_id}/render")
+    history = client.get(f"/api/projects/{project_id}/renders")
+    detail = client.get(f"/api/projects/{project_id}")
+
+    assert rendered.status_code == 200
+    assert history.json()["renders"][0]["status"] == "succeeded"
+    assert history.json()["renders"][0]["outputUrl"]
+    assert f"/outputs/{project_id}/" in history.json()["renders"][0]["outputUrl"]
+    assert detail.json()["latestRender"]["message"] == "测试生成完成。"
+
+
 def fake_analysis(text: str) -> dict:
     if "小星星" in text:
         segments = [
