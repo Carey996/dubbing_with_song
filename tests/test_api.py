@@ -463,6 +463,47 @@ def test_empty_chapter_analysis_fallback_keeps_target_chapter():
     assert merged["segments"][0]["chapterTitle"] == "第二章"
 
 
+def test_song_candidate_lyrics_are_restored_when_llm_omits_lyric_segment():
+    chapter_text = (
+        "舞台上，音乐缓缓响起。\n\n"
+        "当前奏结束，江宇缓缓举起话筒开口了。\n\n"
+        "“久未放晴的天空\n\n"
+        "依旧留着你的笑容\n\n"
+        "哭过却无法掩埋歉疚\n\n"
+        "风筝在阴天搁浅\n\n"
+        "想念还在等待救援\n\n"
+        "我拉着线复习你给的温柔……”\n\n"
+        "当江宇一开口，现场安静了下来。"
+    )
+    chapters = [TextChapter(id="chap-008", title="第8章 搁浅！", text=chapter_text)]
+    llm_result = analyzer.LlmAnalysis(
+        segments=[
+            analyzer.LlmSegment(type="narration", text="舞台上，音乐缓缓响起。"),
+            analyzer.LlmSegment(type="narration", text="当江宇一开口，现场安静了下来。"),
+        ],
+        songCandidates=[
+            analyzer.LlmSongCandidate(
+                title="搁浅",
+                artist="江宇",
+                matchedLyrics=[
+                    "久未放晴的天空\n依旧留着你的笑容\n哭过却无法掩埋歉疚\n风筝在阴天搁浅\n想念还在等待救援\n我拉着线复习你给的温柔…"
+                ],
+                confidence=0.95,
+            )
+        ],
+    )
+
+    normalized = analyzer.normalize_llm_analysis(chapters, llm_result, chapter_text, chapters)
+
+    lyric_segments = [segment for segment in normalized["segments"] if segment["type"] == "lyric"]
+    assert len(lyric_segments) == 1
+    assert lyric_segments[0]["chapterId"] == "chap-008"
+    assert lyric_segments[0]["chapterTitle"] == "第8章 搁浅！"
+    assert "久未放晴的天空" in lyric_segments[0]["text"]
+    assert "风筝在阴天搁浅" in lyric_segments[0]["text"]
+    assert [segment["type"] for segment in normalized["segments"]] == ["narration", "lyric", "narration"]
+
+
 def test_chapters_endpoint_exposes_project_chapters():
     created = client.post("/api/projects", json={"text": "第一章 登台\n内容一。\n\n第二章 唱歌\n内容二。"})
     response = client.get(f"/api/projects/{created.json()['id']}/chapters")
