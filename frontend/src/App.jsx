@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   BookOpen,
@@ -21,6 +21,21 @@ import {
   selectAllProjectIds,
   toggleProjectSelection,
 } from './projectSelection.js';
+import {
+  filterSegmentsByChapter,
+  getClosestSegmentIndexByViewportCenter,
+  getNearestLyricSegmentIndex,
+  getSegmentKindLabel,
+  getSelectedSegment,
+  normalizeSegmentIndex,
+} from './segmentNavigator.js';
+import {
+  buildWorkflowPath,
+  getWorkflowPages,
+  getWorkflowRouteDataNeeds,
+  parseWorkflowRoute,
+  resolveSelectedChapterIdForRoute,
+} from './workflowNavigation.js';
 import './styles.css';
 
 const emptyTimeline = {
@@ -28,6 +43,12 @@ const emptyTimeline = {
   narrationVolume: 1,
   songStartSec: 0,
   segments: [],
+};
+
+const pageIcons = {
+  input: FileText,
+  chapters: BookOpen,
+  analysis: Sparkles,
 };
 
 function App() {
@@ -39,10 +60,11 @@ function App() {
   const [project, setProject] = useState(null);
   const [projectList, setProjectList] = useState([]);
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
-  const [view, setView] = useState('workspace');
+  const [route, setRoute] = useState(() => parseWorkflowRoute(window.location.pathname));
   const [analysis, setAnalysis] = useState(null);
   const [chapters, setChapters] = useState([]);
   const [selectedChapterId, setSelectedChapterId] = useState('');
+  const [selectedSegmentIndex, setSelectedSegmentIndex] = useState(0);
   const [timeline, setTimeline] = useState(emptyTimeline);
   const [renderResult, setRenderResult] = useState(null);
   const [busy, setBusy] = useState('');
@@ -52,18 +74,38 @@ function App() {
   const [analysisTargetLabel, setAnalysisTargetLabel] = useState('');
   const [songDurationSec, setSongDurationSec] = useState(0);
   const [songCursorSec, setSongCursorSec] = useState(0);
+  const segmentRefs = useRef({});
+  const shouldScrollSelectedSegment = useRef(false);
+  const routeRequestId = useRef(0);
 
-  const totals = useMemo(() => {
-    const duration = timeline.segments.reduce((sum, segment) => sum + Number(segment.durationSec || 0), 0);
-    const lyricCount = timeline.segments.filter((segment) => segment.type === 'lyric').length;
-    return { duration: duration.toFixed(1), lyricCount };
-  }, [timeline]);
-
+  const page = route.page;
+  const routeKey = `${route.page}:${route.projectId}:${route.chapterId}`;
+  const segments = timeline.segments || [];
   const selectedChapter = useMemo(
     () => chapters.find((chapter) => chapter.id === selectedChapterId) || null,
     [chapters, selectedChapterId],
   );
+  const visibleSegments = useMemo(
+    () => filterSegmentsByChapter(segments, selectedChapter),
+    [segments, selectedChapter],
+  );
+  const totals = useMemo(() => {
+    const duration = segments.reduce((sum, segment) => sum + Number(segment.durationSec || 0), 0);
+    const lyricCount = segments.filter((segment) => segment.type === 'lyric').length;
+    return { duration: duration.toFixed(1), lyricCount };
+  }, [segments]);
+  const visibleTotals = useMemo(() => {
+    const duration = visibleSegments.reduce((sum, segment) => sum + Number(segment.durationSec || 0), 0);
+    const lyricCount = visibleSegments.filter((segment) => segment.type === 'lyric').length;
+    return { duration: duration.toFixed(1), lyricCount };
+  }, [visibleSegments]);
+
+  const workflowPages = useMemo(() => getWorkflowPages({ project, timeline }), [project, timeline]);
   const previewChapter = selectedChapter || chapters[0] || null;
+  const { segment: selectedSegment, index: normalizedSegmentIndex } = useMemo(
+    () => getSelectedSegment(visibleSegments, selectedSegmentIndex),
+    [visibleSegments, selectedSegmentIndex],
+  );
   const isAnalyzing = busy === 'analyzing';
   const localSongUrl = useMemo(() => (songFile ? URL.createObjectURL(songFile) : ''), [songFile]);
   const localChapterSongUrl = useMemo(() => (
@@ -98,12 +140,110 @@ function App() {
   }, [isAnalyzing]);
 
   useEffect(() => {
-    loadProjectList();
+    const handlePopState = () => setRoute(parseWorkflowRoute(window.location.pathname));
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   useEffect(() => {
     setSelectedProjectIds((current) => normalizeSelectedProjectIds(projectList, current));
   }, [projectList]);
+
+  useEffect(() => {
+    const dataNeeds = getWorkflowRouteDataNeeds(route);
+    const requestId = routeRequestId.current + 1;
+    routeRequestId.current = requestId;
+    let cancelled = false;
+
+    async function loadRouteData() {
+      setError('');
+
+      if (!dataNeeds.projectDetail) {
+        if (route.page === 'input' && !route.projectId) {
+          clearCurrentProjectState();
+        }
+        if (dataNeeds.projectList) {
+          await loadProjectList();
+        }
+        return;
+      }
+
+      setBusy('loading-project');
+      try {
+        const detail = await request(`/api/projects/${route.projectId}`);
+        const nextChapters = dataNeeds.chapters
+          ? (await request(`/api/projects/${route.projectId}/chapters`)).chapters || []
+          : null;
+        if (cancelled || routeRequestId.current !== requestId) return;
+        applyProjectDetail(detail, nextChapters);
+        if (nextChapters) {
+          setSelectedChapterId(resolveSelectedChapterIdForRoute({
+            route,
+            chapters: nextChapters,
+            currentChapterId: selectedChapterId,
+          }));
+        }
+        if (dataNeeds.projectList) {
+          await loadProjectList();
+        }
+      } catch (err) {
+        if (!cancelled) setError(err.message);
+      } finally {
+        if (!cancelled && routeRequestId.current === requestId) {
+          setBusy('');
+        }
+      }
+    }
+
+    loadRouteData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [routeKey]);
+
+  useEffect(() => {
+    setSelectedSegmentIndex((currentIndex) => normalizeSegmentIndex(currentIndex, visibleSegments));
+  }, [visibleSegments]);
+
+  useEffect(() => {
+    if (page !== 'analysis' || !selectedSegment) return;
+    if (!shouldScrollSelectedSegment.current) return;
+    shouldScrollSelectedSegment.current = false;
+    segmentRefs.current[selectedSegment.id]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [page, normalizedSegmentIndex, selectedSegment]);
+
+  useEffect(() => {
+    if (page !== 'analysis' || visibleSegments.length === 0) return undefined;
+
+    let frameId = 0;
+    const syncSelectedSegmentToScroll = () => {
+      if (frameId) return;
+      frameId = window.requestAnimationFrame(() => {
+        frameId = 0;
+        const measurements = visibleSegments
+          .map((segment, index) => {
+            const node = segmentRefs.current[segment.id];
+            if (!node) return null;
+            const rect = node.getBoundingClientRect();
+            return { index, top: rect.top, bottom: rect.bottom };
+          })
+          .filter(Boolean);
+        const nextIndex = getClosestSegmentIndexByViewportCenter(measurements, window.innerHeight);
+        setSelectedSegmentIndex((currentIndex) => (currentIndex === nextIndex ? currentIndex : nextIndex));
+      });
+    };
+
+    window.addEventListener('scroll', syncSelectedSegmentToScroll, { passive: true });
+    window.addEventListener('resize', syncSelectedSegmentToScroll);
+    syncSelectedSegmentToScroll();
+
+    return () => {
+      window.removeEventListener('scroll', syncSelectedSegmentToScroll);
+      window.removeEventListener('resize', syncSelectedSegmentToScroll);
+      if (frameId) window.cancelAnimationFrame(frameId);
+    };
+  }, [page, visibleSegments]);
 
   useEffect(() => (
     () => {
@@ -117,6 +257,19 @@ function App() {
     }
   ), [localChapterSongUrl]);
 
+  function navigateTo(nextRoute, { replace = false } = {}) {
+    const normalizedRoute = {
+      page: nextRoute.page || 'input',
+      projectId: nextRoute.projectId || '',
+      chapterId: nextRoute.chapterId || '',
+    };
+    const nextPath = buildWorkflowPath(normalizedRoute);
+    if (window.location.pathname !== nextPath) {
+      window.history[replace ? 'replaceState' : 'pushState']({}, '', nextPath);
+    }
+    setRoute(parseWorkflowRoute(nextPath));
+  }
+
   function applyChapters(nextChapters) {
     setChapters(nextChapters);
     setSelectedChapterId((currentId) => (
@@ -124,7 +277,7 @@ function App() {
     ));
   }
 
-  function resetCurrentProject() {
+  function clearCurrentProjectState() {
     setProject(null);
     setText('');
     setTxtFile(null);
@@ -135,6 +288,12 @@ function App() {
     applyChapters([]);
     setTimeline(emptyTimeline);
     setRenderResult(null);
+    setSelectedSegmentIndex(0);
+  }
+
+  function resetCurrentProject() {
+    clearCurrentProjectState();
+    navigateTo({ page: 'input' }, { replace: true });
   }
 
   async function loadProjectList() {
@@ -156,6 +315,7 @@ function App() {
     setAnalysis(data.analysis || null);
     setTimeline(data.timeline || emptyTimeline);
     setRenderResult(data.latestRender || null);
+    setSelectedSegmentIndex(0);
     if (nextChapters) {
       applyChapters(nextChapters);
     } else if (data.analysis?.chapters?.length) {
@@ -170,22 +330,15 @@ function App() {
       request(`/api/projects/${projectId}`),
       request(`/api/projects/${projectId}/chapters`),
     ]);
-    applyProjectDetail(detail, chapterData.chapters || []);
+    const nextChapters = chapterData.chapters || [];
+    applyProjectDetail(detail, nextChapters);
     await loadProjectList();
+    return { detail, chapters: nextChapters };
   }
 
-  async function loadProject(projectId) {
+  function loadProject(projectId, nextPage = 'chapters') {
     if (!projectId) return;
-    setBusy('loading-project');
-    setError('');
-    try {
-      await refreshProject(projectId);
-      setView('workspace');
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy('');
-    }
+    navigateTo({ page: nextPage === 'auto' ? 'chapters' : nextPage, projectId });
   }
 
   async function deleteProject(projectId) {
@@ -198,7 +351,7 @@ function App() {
     setError('');
     try {
       await request(`/api/projects/${projectId}`, { method: 'DELETE' });
-      if (project?.id === projectId) {
+      if (project?.id === projectId || route.projectId === projectId) {
         resetCurrentProject();
       }
       setSelectedProjectIds((current) => current.filter((id) => id !== projectId));
@@ -254,9 +407,10 @@ function App() {
       }
       setProject(data);
       setAnalysis(null);
-      await loadChapters(data.id);
       setTimeline(emptyTimeline);
+      await loadChapters(data.id);
       await loadProjectList();
+      navigateTo({ page: 'chapters', projectId: data.id });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -264,9 +418,9 @@ function App() {
     }
   }
 
-  async function analyzeProject() {
+  async function analyzeProject(chapterForAnalysis = selectedChapter) {
     if (!project) return;
-    const chapterForAnalysis = selectedChapter;
+    setSelectedChapterId(chapterForAnalysis?.id || '');
     setBusy('analyzing');
     setError('');
     setAnalysisTargetLabel(chapterForAnalysis ? chapterForAnalysis.title : '全篇文本');
@@ -281,8 +435,14 @@ function App() {
       setAnalysis(data);
       applyChapters(data.chapters || chapters);
       setTimeline(data.timeline);
+      setSelectedSegmentIndex(0);
       setAnalysisProgress(completeAnalysisProgress());
       await refreshProject(project.id);
+      navigateTo({
+        page: 'analysis',
+        projectId: project.id,
+        chapterId: chapterForAnalysis?.id || '',
+      });
       completed = true;
     } catch (err) {
       setError(err.message);
@@ -438,7 +598,7 @@ function App() {
   function previewNarration() {
     if (!window.speechSynthesis) return;
     window.speechSynthesis.cancel();
-    const narration = timeline.segments
+    const narration = segments
       .filter((segment) => segment.type === 'narration')
       .map((segment) => segment.text)
       .join('。');
@@ -447,8 +607,38 @@ function App() {
     window.speechSynthesis.speak(utterance);
   }
 
+  function selectSegment(index) {
+    shouldScrollSelectedSegment.current = true;
+    setSelectedSegmentIndex(normalizeSegmentIndex(index, visibleSegments));
+    if (project) {
+      navigateTo({
+        page: 'analysis',
+        projectId: project.id,
+        chapterId: selectedChapter?.id || '',
+      }, { replace: true });
+    }
+  }
+
+  function jumpToNearestLyric() {
+    shouldScrollSelectedSegment.current = true;
+    setSelectedSegmentIndex((currentIndex) => getNearestLyricSegmentIndex(visibleSegments, currentIndex));
+    if (project) {
+      navigateTo({
+        page: 'analysis',
+        projectId: project.id,
+        chapterId: selectedChapter?.id || '',
+      }, { replace: true });
+    }
+  }
+
+  const commonAudioProps = {
+    songAudioUrl,
+    setSongDurationSec,
+    setSongCursorSec,
+  };
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${page === 'analysis' && segments.length ? 'has-segment-navigator' : ''}`}>
       <header className="topbar">
         <div>
           <p className="eyebrow">Local workflow</p>
@@ -458,15 +648,36 @@ function App() {
           <div className="status-strip">
             <span>{project ? `项目 ${project.id}` : '未创建项目'}</span>
             <span>{chapters.length} 章</span>
-            <span>{timeline.segments.length} 段</span>
+            <span>{segments.length} 段</span>
             <span>{totals.duration}s</span>
           </div>
-          <div className="view-switch">
-            <button type="button" className={view === 'workspace' ? 'primary' : ''} onClick={() => setView('workspace')}>
-              <Sparkles size={18} />
-              工作台
-            </button>
-            <button type="button" className={view === 'history' ? 'primary' : ''} onClick={() => setView('history')}>
+          <div className="topbar-actions">
+            <div className="workflow-stepper" aria-label="工作流页面">
+              {workflowPages.map((item, index) => {
+              const Icon = pageIcons[item.id] || Sparkles;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`workflow-step ${page === item.id ? 'primary' : ''}`}
+                  onClick={() => navigateTo({
+                    page: item.id,
+                    projectId: project?.id || route.projectId,
+                    chapterId: item.id === 'input' ? '' : selectedChapter?.id || route.chapterId,
+                  })}
+                >
+                  <span className="step-number">{index + 1}</span>
+                  <Icon size={18} />
+                  {item.label}
+                </button>
+              );
+            })}
+            </div>
+            <button
+              type="button"
+              className={`history-entry ${page === 'history' ? 'primary' : ''}`}
+              onClick={() => navigateTo({ page: 'history' })}
+            >
               <History size={18} />
               历史项目
             </button>
@@ -476,135 +687,465 @@ function App() {
 
       {error && <div className="notice error">{error}</div>}
 
-      {view === 'history' ? (
+      {page === 'history' && (
         <HistoryPage
           busy={busy}
           currentProjectId={project?.id || ''}
           projects={projectList}
           selectedProjectIds={selectedProjectIds}
-          onBack={() => setView('workspace')}
+          onBack={() => navigateTo({ page: 'input', projectId: project?.id || route.projectId })}
           onClearSelection={() => setSelectedProjectIds([])}
           onDelete={deleteProject}
           onDeleteSelected={deleteSelectedProjects}
-          onOpen={loadProject}
+          onOpen={(projectId) => loadProject(projectId)}
           onSelectAll={() => setSelectedProjectIds(selectAllProjectIds(projectList))}
           onToggleSelection={(projectId) => setSelectedProjectIds((current) => toggleProjectSelection(current, projectId))}
         />
-      ) : (
-      <section className="workspace-grid">
-        <aside className="side-panel">
-          <PanelTitle icon={<FileText />} title="输入" />
-          <textarea
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            placeholder="粘贴文案，或上传 txt 文件。"
-          />
+      )}
+
+      {page === 'input' && (
+        <InputPage
+          busy={busy}
+          project={project}
+          projectList={projectList}
+          text={text}
+          txtFile={txtFile}
+          onCreateProject={createProject}
+          onDeleteProject={deleteProject}
+          onLoadProject={loadProject}
+          onSetText={setText}
+          onSetTxtFile={setTxtFile}
+        />
+      )}
+
+      {page === 'chapters' && (
+        <ChaptersPage
+          analysisPhase={analysisPhase}
+          analysisProgress={analysisProgress}
+          analysisProgressVisible={analysisProgressVisible}
+          analysisTargetLabel={analysisTargetLabel}
+          busy={busy}
+          chapterLrcFile={chapterLrcFile}
+          chapterSongFile={chapterSongFile}
+          chapters={chapters}
+          isAnalyzing={isAnalyzing}
+          localChapterSongUrl={localChapterSongUrl}
+          previewChapter={previewChapter}
+          selectedChapter={selectedChapter}
+          selectedChapterId={selectedChapterId}
+          selectedChapterSongUrl={selectedChapterSongUrl}
+          onAnalyzeChapter={() => analyzeProject(selectedChapter)}
+          onAnalyzeFull={() => analyzeProject(null)}
+          onLoadChapters={() => loadChapters()}
+          onSelectChapter={(chapterId) => {
+            setSelectedChapterId(chapterId);
+            if (project) {
+              navigateTo({ page: 'chapters', projectId: project.id, chapterId }, { replace: true });
+            }
+          }}
+          onSetChapterLrcFile={setChapterLrcFile}
+          onSetChapterSongFile={setChapterSongFile}
+          onUploadChapterLrc={uploadChapterLrc}
+          onUploadChapterSong={uploadChapterSong}
+          setSongCursorSec={setSongCursorSec}
+          setSongDurationSec={setSongDurationSec}
+        />
+      )}
+
+      {page === 'analysis' && (
+        <AnalysisPage
+          analysis={analysis}
+          busy={busy}
+          project={project}
+          renderResult={renderResult}
+          selectedSegmentId={selectedSegment?.id || ''}
+          selectedChapter={selectedChapter}
+          segments={visibleSegments}
+          segmentRefs={segmentRefs}
+          songFile={songFile}
+          songAudioUrl={songAudioUrl}
+          text={text}
+          timeline={timeline}
+          totals={visibleTotals}
+          onBackToChapters={() => navigateTo({
+            page: 'chapters',
+            projectId: project?.id || route.projectId,
+            chapterId: selectedChapter?.id || route.chapterId,
+          })}
+          onAnalyzeChapter={() => analyzeProject(selectedChapter)}
+          onPreviewNarration={previewNarration}
+          onRenderAudio={renderAudio}
+          onSaveTimeline={saveTimeline}
+          onSelectSegment={selectSegment}
+          onSetCueFromPlayback={setCueFromPlayback}
+          onSetSongFile={setSongFile}
+          onSetTimeline={setTimeline}
+          onUpdateSegment={updateSegment}
+          onUploadSong={uploadSong}
+          getSegmentSongAudioUrl={getSegmentSongAudioUrl}
+          getCueMax={getCueMax}
+          {...commonAudioProps}
+        />
+      )}
+
+      {page === 'analysis' && visibleSegments.length > 0 && (
+        <SegmentNavigator
+          index={normalizedSegmentIndex}
+          segment={selectedSegment}
+          segments={visibleSegments}
+          onJumpToLyric={jumpToNearestLyric}
+          onSelect={selectSegment}
+        />
+      )}
+    </main>
+  );
+}
+
+function InputPage({
+  busy,
+  project,
+  projectList,
+  text,
+  txtFile,
+  onCreateProject,
+  onDeleteProject,
+  onLoadProject,
+  onSetText,
+  onSetTxtFile,
+}) {
+  return (
+    <section className="page-layout input-page">
+      <section className="page-main">
+        <PanelTitle icon={<FileText />} title="项目输入" />
+        <textarea
+          className="source-editor"
+          value={text}
+          onChange={(event) => onSetText(event.target.value)}
+          placeholder="粘贴文案，或上传 txt 文件。"
+        />
+        <div className="input-actions">
           <label className="file-picker">
             <Upload size={18} />
             <span>{txtFile ? txtFile.name : '选择 txt 文件'}</span>
             <input
               type="file"
               accept=".txt,text/plain"
-              onChange={(event) => setTxtFile(event.target.files?.[0] || null)}
+              onChange={(event) => onSetTxtFile(event.target.files?.[0] || null)}
             />
           </label>
-          <button onClick={createProject} disabled={busy || (!text.trim() && !txtFile)} className="primary">
+          <button onClick={onCreateProject} disabled={busy || (!text.trim() && !txtFile)} className="primary">
             <Upload size={18} />
             创建项目
           </button>
-          {projectList.length > 0 && (
-            <div className="project-history">
-              <PanelTitle icon={<BookOpen />} title="历史项目" />
-              {projectList.map((item) => (
-                <div key={item.id} className={`project-history-row ${project?.id === item.id ? 'active' : ''}`}>
-                  <button
-                    type="button"
-                    className="project-history-item"
-                    onClick={() => loadProject(item.id)}
-                    disabled={busy}
-                  >
-                    <span>{item.title || item.id}</span>
-                    <small>{item.status} · {item.textLength} 字</small>
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-button danger"
-                    onClick={() => deleteProject(item.id)}
-                    disabled={busy}
-                    aria-label={`删除 ${item.title || item.id}`}
-                    title="删除项目"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
+        </div>
+      </section>
+
+      <aside className="page-side">
+        <PanelTitle icon={<BookOpen />} title="当前项目" />
+        <div className="project-summary">
+          <strong>{project?.title || project?.id || '尚未选择项目'}</strong>
+          <span>{project ? `${project.textLength || text.length} 字` : '创建或打开项目后进入章节预览'}</span>
+        </div>
+        {projectList.length > 0 && (
+          <div className="project-history">
+            <PanelTitle icon={<History />} title="最近项目" />
+            {projectList.slice(0, 5).map((item) => (
+              <div key={item.id} className={`project-history-row ${project?.id === item.id ? 'active' : ''}`}>
+                <button
+                  type="button"
+                  className="project-history-item"
+                  onClick={() => onLoadProject(item.id)}
+                  disabled={busy}
+                >
+                  <span>{item.title || item.id}</span>
+                  <small>{item.status} · {item.textLength} 字</small>
+                </button>
+                <button
+                  type="button"
+                  className="icon-button danger"
+                  onClick={() => onDeleteProject(item.id)}
+                  disabled={busy}
+                  aria-label={`删除 ${item.title || item.id}`}
+                  title="删除项目"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </aside>
+    </section>
+  );
+}
+
+function ChaptersPage({
+  analysisPhase,
+  analysisProgress,
+  analysisProgressVisible,
+  analysisTargetLabel,
+  busy,
+  chapterLrcFile,
+  chapterSongFile,
+  chapters,
+  isAnalyzing,
+  localChapterSongUrl,
+  previewChapter,
+  selectedChapter,
+  selectedChapterId,
+  selectedChapterSongUrl,
+  onAnalyzeChapter,
+  onAnalyzeFull,
+  onLoadChapters,
+  onSelectChapter,
+  onSetChapterLrcFile,
+  onSetChapterSongFile,
+  onUploadChapterLrc,
+  onUploadChapterSong,
+  setSongCursorSec,
+  setSongDurationSec,
+}) {
+  return (
+    <section className="page-layout chapters-page">
+      <section className="page-main">
+        <div className="page-toolbar">
+          <div>
+            <h2>章节预览</h2>
+            <p>先确认章节和正文，再选择全篇或单章进入分析。</p>
+          </div>
+          <div className="actions">
+            <button type="button" onClick={onLoadChapters} disabled={busy}>
+              <FileText size={18} />
+              刷新章节
+            </button>
+            <button type="button" onClick={onAnalyzeFull} disabled={busy} className={!selectedChapterId ? 'primary' : ''}>
+              {isAnalyzing ? <span className="spinner" aria-hidden="true" /> : <Sparkles size={18} />}
+              分析全篇
+            </button>
+            <button type="button" onClick={onAnalyzeChapter} disabled={busy || !selectedChapter} className={selectedChapter ? 'primary' : ''}>
+              {isAnalyzing ? <span className="spinner" aria-hidden="true" /> : <Sparkles size={18} />}
+              分析当前章节
+            </button>
+          </div>
+        </div>
+        {analysisProgressVisible && (
+          <AnalysisProgress
+            label={analysisTargetLabel}
+            phase={analysisPhase}
+            progress={analysisProgress}
+          />
+        )}
+        {chapters.length > 0 ? (
+          <div className="chapter-workspace">
+            <div className="chapter-actions">
+              <button type="button" onClick={() => onSelectChapter('')} className={!selectedChapterId ? 'primary' : ''}>
+                全篇
+              </button>
+            </div>
+            <div className="chapter-list" aria-label="章节预览">
+              {chapters.map((chapter) => (
+                <button
+                  key={chapter.id}
+                  type="button"
+                  className={`chapter-button ${selectedChapter?.id === chapter.id ? 'active' : ''}`}
+                  onClick={() => onSelectChapter(chapter.id)}
+                >
+                  <BookOpen size={16} />
+                  <span>{chapter.title}</span>
+                  <small>{chapter.textLength} 字</small>
+                </button>
               ))}
             </div>
-          )}
-          <button onClick={analyzeProject} disabled={busy || !project}>
-            {isAnalyzing ? <span className="spinner" aria-hidden="true" /> : <Sparkles size={18} />}
-            {isAnalyzing ? '分析中' : selectedChapter ? '分析当前章节' : 'AI 分析'}
-          </button>
-          {analysisProgressVisible && (
-            <div className="analysis-progress" role="status" aria-live="polite">
-              <div className="analysis-progress-head">
-                <strong>{analysisTargetLabel}</strong>
-                <span>{Math.round(analysisProgress)}%</span>
-              </div>
-              <div className="progress-track" aria-hidden="true">
-                <div className="progress-fill" style={{ width: `${analysisProgress}%` }} />
-              </div>
-              <small>{analysisPhase}</small>
-            </div>
-          )}
-          <button onClick={() => loadChapters()} disabled={busy || !project}>
-            <FileText size={18} />
-            章节预览
-          </button>
-
-          <PanelTitle icon={<Music />} title="歌曲文件" />
-          <label className="file-picker">
-            <FileAudio size={18} />
-            <span>{songFile ? songFile.name : '选择 MP3'}</span>
-            <input
-              type="file"
-              accept=".mp3,audio/mpeg"
-              onChange={(event) => setSongFile(event.target.files?.[0] || null)}
-            />
-          </label>
-          <button onClick={uploadSong} disabled={busy || !project || !songFile}>
-            <Upload size={18} />
-            上传 MP3
-          </button>
-          {songAudioUrl && (
-            <audio
-              className="audio"
-              src={songAudioUrl}
-              controls
-              preload="metadata"
-              onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
-              onTimeUpdate={(event) => setSongCursorSec(roundSeconds(event.currentTarget.currentTime || 0))}
-            />
-          )}
-        </aside>
-
-        <section className="main-panel">
-          <div className="toolbar">
-            <div>
-              <h2>时间轴确认</h2>
-              <p>{totals.lyricCount} 个歌词候选，用户确认后再导出。</p>
-            </div>
-            <div className="actions">
-              <button onClick={previewNarration} disabled={!timeline.segments.length && !text}>
-                <Play size={18} />
-                浏览器试听旁白
-              </button>
-              <button onClick={renderAudio} disabled={busy || !project || !timeline.segments.length} className="primary">
-                <Download size={18} />
-                生成音频
-              </button>
-            </div>
+            {previewChapter && (
+              <article className="chapter-detail">
+                <div>
+                  <strong>{previewChapter.title}</strong>
+                  <span>{previewChapter.textLength} 字</span>
+                </div>
+                <div className="chapter-assets">
+                  <span>{previewChapter.chapterSong ? '已上传章节 MP3' : '未上传章节 MP3'}</span>
+                  <span>{previewChapter.chapterLyric ? '已上传 LRC' : '未上传 LRC'}</span>
+                </div>
+                {selectedChapter && (
+                  <div className="chapter-upload-grid">
+                    <label className="file-picker compact">
+                      <FileAudio size={18} />
+                      <span>{chapterSongFile ? chapterSongFile.name : '选择本章节 MP3'}</span>
+                      <input
+                        type="file"
+                        accept=".mp3,audio/mpeg"
+                        onChange={(event) => onSetChapterSongFile(event.target.files?.[0] || null)}
+                      />
+                    </label>
+                    <button onClick={onUploadChapterSong} disabled={busy || !chapterSongFile}>
+                      <Upload size={18} />
+                      上传 MP3
+                    </button>
+                    <label className="file-picker compact">
+                      <FileText size={18} />
+                      <span>{chapterLrcFile ? chapterLrcFile.name : '选择 LRC'}</span>
+                      <input
+                        type="file"
+                        accept=".lrc"
+                        onChange={(event) => onSetChapterLrcFile(event.target.files?.[0] || null)}
+                      />
+                    </label>
+                    <button onClick={onUploadChapterLrc} disabled={busy || !chapterLrcFile}>
+                      <Upload size={18} />
+                      上传 LRC
+                    </button>
+                  </div>
+                )}
+                {(localChapterSongUrl || selectedChapterSongUrl) && (
+                  <audio
+                    className="audio"
+                    src={localChapterSongUrl || selectedChapterSongUrl}
+                    controls
+                    preload="metadata"
+                    onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
+                    onTimeUpdate={(event) => setSongCursorSec(roundSeconds(event.currentTarget.currentTime || 0))}
+                  />
+                )}
+                <p>{previewChapter.text}</p>
+              </article>
+            )}
           </div>
+        ) : (
+          <EmptyState icon={<BookOpen size={28} />} title="暂无章节" />
+        )}
+      </section>
+    </section>
+  );
+}
 
+function AnalysisPage({
+  analysis,
+  busy,
+  project,
+  renderResult,
+  selectedChapter,
+  selectedSegmentId,
+  segments,
+  segmentRefs,
+  songFile,
+  songAudioUrl,
+  text,
+  timeline,
+  totals,
+  onAnalyzeChapter,
+  onBackToChapters,
+  onPreviewNarration,
+  onRenderAudio,
+  onSaveTimeline,
+  onSelectSegment,
+  onSetCueFromPlayback,
+  onSetSongFile,
+  onSetTimeline,
+  onUpdateSegment,
+  onUploadSong,
+  getSegmentSongAudioUrl,
+  getCueMax,
+  setSongDurationSec,
+  setSongCursorSec,
+}) {
+  const scopeLabel = selectedChapter ? selectedChapter.title : '全篇';
+  const scopeMeta = selectedChapter
+    ? `${selectedChapter.textLength} 字 · 当前显示本章节片段`
+    : '当前显示全部分析片段';
+
+  return (
+    <section className="page-layout analysis-page">
+      <section className="page-main">
+        <div className="page-toolbar">
+          <div>
+            <h2>分析与导出</h2>
+            <p>{totals.lyricCount} 个歌词候选。先校对片段，再在同一页确认混音并生成音频。</p>
+          </div>
+          <div className="actions">
+            <button onClick={onPreviewNarration} disabled={!segments.length && !text}>
+              <Play size={18} />
+              试听旁白
+            </button>
+            <button type="button" onClick={onSaveTimeline} disabled={busy || !project || !segments.length}>
+              保存时间轴
+            </button>
+            <button onClick={onRenderAudio} disabled={busy || !project || !segments.length} className="primary">
+              <Download size={18} />
+              生成音频
+            </button>
+          </div>
+        </div>
+
+        <div className="analysis-scope">
+          <div>
+            <span>当前范围</span>
+            <strong>{scopeLabel}</strong>
+            <small>{scopeMeta}</small>
+          </div>
+          <button type="button" onClick={onBackToChapters}>
+            <BookOpen size={18} />
+            回章节选择
+          </button>
+        </div>
+
+        {analysis?.songCandidates?.length > 0 && (
+          <div className="song-candidates">
+            {analysis.songCandidates.map((candidate) => (
+              <article key={`${candidate.title}-${candidate.artist}`}>
+                <div>
+                  <strong>{candidate.title}</strong>
+                  <span>{candidate.artist}</span>
+                </div>
+                <p>{candidate.matchedLyrics.join(' / ')}</p>
+                <small>置信度 {Math.round(candidate.confidence * 100)}% · {candidate.note}</small>
+              </article>
+            ))}
+          </div>
+        )}
+
+        {segments.length > 0 ? (
+          <div className="segment-list">
+            {segments.map((segment, index) => (
+              <SegmentCard
+                key={segment.id}
+                audioProps={{ songAudioUrl, setSongDurationSec, setSongCursorSec }}
+                busy={busy}
+                getCueMax={getCueMax}
+                isSelected={selectedSegmentId === segment.id}
+                project={project}
+                refCallback={(node) => {
+                  if (node) segmentRefs.current[segment.id] = node;
+                }}
+                segment={segment}
+                songFile={songFile}
+                songAudioUrl={getSegmentSongAudioUrl(segment)}
+                onSelect={() => onSelectSegment(index)}
+                onSetCueFromPlayback={onSetCueFromPlayback}
+                onSetSongFile={onSetSongFile}
+                onUpdateSegment={onUpdateSegment}
+                onUploadSong={onUploadSong}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state action-empty">
+            <Sparkles size={28} />
+            <strong>{selectedChapter ? '当前章节还没有分析片段' : '暂无分析片段'}</strong>
+            {selectedChapter && <span>先回章节页确认范围，或直接重新分析当前章节。</span>}
+            {selectedChapter && (
+              <button type="button" className="primary" onClick={onAnalyzeChapter} disabled={busy || !project}>
+                <Sparkles size={18} />
+                分析当前章节
+              </button>
+            )}
+          </div>
+        )}
+
+        <section className="export-panel">
+          <div>
+            <h2>导出设置</h2>
+            <p>这些参数会应用到当前分析时间轴。</p>
+          </div>
           <div className="mix-controls">
             <label>
               BGM 音量
@@ -614,7 +1155,7 @@ function App() {
                 max="1"
                 step="0.01"
                 value={timeline.bgmVolume}
-                onChange={(event) => setTimeline({ ...timeline, bgmVolume: Number(event.target.value) })}
+                onChange={(event) => onSetTimeline({ ...timeline, bgmVolume: Number(event.target.value) })}
               />
               <strong>{Math.round(timeline.bgmVolume * 100)}%</strong>
             </label>
@@ -625,269 +1166,13 @@ function App() {
                 min="0"
                 step="0.1"
                 value={timeline.songStartSec}
-                onChange={(event) => setTimeline({ ...timeline, songStartSec: Number(event.target.value) })}
+                onChange={(event) => onSetTimeline({ ...timeline, songStartSec: Number(event.target.value) })}
               />
             </label>
-            <button onClick={saveTimeline} disabled={busy || !project || !timeline.segments.length}>
+            <button onClick={onSaveTimeline} disabled={busy || !project || !segments.length}>
               保存时间轴
             </button>
           </div>
-
-          {analysis?.songCandidates?.length > 0 && (
-            <div className="song-candidates">
-              {analysis.songCandidates.map((candidate) => (
-                <article key={`${candidate.title}-${candidate.artist}`}>
-                  <div>
-                    <strong>{candidate.title}</strong>
-                    <span>{candidate.artist}</span>
-                  </div>
-                  <p>{candidate.matchedLyrics.join(' / ')}</p>
-                  <small>置信度 {Math.round(candidate.confidence * 100)}% · {candidate.note}</small>
-                </article>
-              ))}
-            </div>
-          )}
-
-          {chapters.length > 0 && (
-            <div className="chapter-preview">
-              <div className="chapter-actions">
-                <button type="button" onClick={() => setSelectedChapterId('')} className={!selectedChapterId ? 'primary' : ''}>
-                  全篇
-                </button>
-              </div>
-              <div className="chapter-list" aria-label="章节预览">
-                {chapters.map((chapter) => (
-                  <button
-                    key={chapter.id}
-                    type="button"
-                    className={`chapter-button ${selectedChapter?.id === chapter.id ? 'active' : ''}`}
-                    onClick={() => setSelectedChapterId(chapter.id)}
-                  >
-                    <BookOpen size={16} />
-                    <span>{chapter.title}</span>
-                    <small>{chapter.textLength} 字</small>
-                  </button>
-                ))}
-              </div>
-              {previewChapter && (
-                <article className="chapter-detail">
-                  <div>
-                    <strong>{previewChapter.title}</strong>
-                    <span>{previewChapter.textLength} 字</span>
-                  </div>
-                  <div className="chapter-assets">
-                    <span>{previewChapter.chapterSong ? '已上传章节 MP3' : '未上传章节 MP3'}</span>
-                    <span>{previewChapter.chapterLyric ? '已上传 LRC' : '未上传 LRC'}</span>
-                  </div>
-                  {selectedChapter && (
-                    <div className="chapter-upload-grid">
-                      <label className="file-picker compact">
-                        <FileAudio size={18} />
-                        <span>{chapterSongFile ? chapterSongFile.name : '选择本章节 MP3'}</span>
-                        <input
-                          type="file"
-                          accept=".mp3,audio/mpeg"
-                          onChange={(event) => setChapterSongFile(event.target.files?.[0] || null)}
-                        />
-                      </label>
-                      <button onClick={uploadChapterSong} disabled={busy || !chapterSongFile}>
-                        <Upload size={18} />
-                        上传 MP3
-                      </button>
-                      <label className="file-picker compact">
-                        <FileText size={18} />
-                        <span>{chapterLrcFile ? chapterLrcFile.name : '选择 LRC'}</span>
-                        <input
-                          type="file"
-                          accept=".lrc"
-                          onChange={(event) => setChapterLrcFile(event.target.files?.[0] || null)}
-                        />
-                      </label>
-                      <button onClick={uploadChapterLrc} disabled={busy || !chapterLrcFile}>
-                        <Upload size={18} />
-                        上传 LRC
-                      </button>
-                    </div>
-                  )}
-                  {(localChapterSongUrl || selectedChapterSongUrl) && (
-                    <audio
-                      className="audio"
-                      src={localChapterSongUrl || selectedChapterSongUrl}
-                      controls
-                      preload="metadata"
-                      onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
-                      onTimeUpdate={(event) => setSongCursorSec(roundSeconds(event.currentTarget.currentTime || 0))}
-                    />
-                  )}
-                  <p>{previewChapter.text}</p>
-                </article>
-              )}
-            </div>
-          )}
-
-          <div className="segment-list">
-            {timeline.segments.map((segment) => (
-              <article className={`segment ${segment.type}`} key={segment.id}>
-                <div className="segment-head">
-                  <select value={segment.type} onChange={(event) => updateSegment(segment.id, { type: event.target.value })}>
-                    <option value="narration">旁白</option>
-                    <option value="lyric">歌词</option>
-                  </select>
-                  <span className="chapter-pill">{segment.chapterTitle || '正文'}</span>
-                  <span>{segment.startSec}s</span>
-                  <label>
-                    时长
-                    <input
-                      type="number"
-                      min="0.5"
-                      step="0.1"
-                      value={segment.durationSec}
-                      onChange={(event) => updateSegment(segment.id, { durationSec: Number(event.target.value) })}
-                    />
-                  </label>
-                </div>
-                <div className="voice-summary" aria-label="配音提示">
-                  <span>{segment.speakerName || '旁白'}</span>
-                  <span>{formatSpeakerGender(segment.speakerGender)}</span>
-                  <span>{segment.emotion || 'neutral'}</span>
-                  <span>{segment.voiceStyle || 'neutral_narrator'}</span>
-                  <strong>{segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}</strong>
-                </div>
-                <div className="voice-controls">
-                  <label>
-                    说话人
-                    <input
-                      type="text"
-                      value={segment.speakerName || '旁白'}
-                      onChange={(event) => updateSegment(segment.id, { speakerName: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    性别
-                    <select
-                      value={segment.speakerGender || 'unknown'}
-                      onChange={(event) => updateSegment(segment.id, { speakerGender: event.target.value })}
-                    >
-                      <option value="unknown">未知</option>
-                      <option value="female">女声</option>
-                      <option value="male">男声</option>
-                    </select>
-                  </label>
-                  <label>
-                    情绪
-                    <input
-                      type="text"
-                      value={segment.emotion || 'neutral'}
-                      onChange={(event) => updateSegment(segment.id, { emotion: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    音色
-                    <input
-                      type="text"
-                      value={segment.voiceStyle || 'neutral_narrator'}
-                      onChange={(event) => updateSegment(segment.id, { voiceStyle: event.target.value })}
-                    />
-                  </label>
-                </div>
-                <label className="delivery-control">
-                  朗读方式
-                  <input
-                    type="text"
-                    value={segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}
-                    onChange={(event) => updateSegment(segment.id, { delivery: event.target.value })}
-                  />
-                </label>
-                <textarea value={segment.text} onChange={(event) => updateSegment(segment.id, { text: event.target.value })} />
-                {segment.type === 'lyric' && (
-                  <div className="lyric-controls">
-                    <div className="lyric-song-panel">
-                      <label className="file-picker compact">
-                        <FileAudio size={18} />
-                        <span>{songFile ? songFile.name : project?.hasSong ? '替换 MP3' : '选择 MP3'}</span>
-                        <input
-                          type="file"
-                          accept=".mp3,audio/mpeg"
-                          onChange={(event) => setSongFile(event.target.files?.[0] || null)}
-                        />
-                      </label>
-                      <button onClick={uploadSong} disabled={busy || !project || !songFile}>
-                        <Upload size={18} />
-                        上传
-                      </button>
-                      {getSegmentSongAudioUrl(segment) && (
-                        <audio
-                          className="audio"
-                          src={getSegmentSongAudioUrl(segment)}
-                          controls
-                          preload="metadata"
-                          onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
-                          onTimeUpdate={(event) => setSongCursorSec(roundSeconds(event.currentTarget.currentTime || 0))}
-                        />
-                      )}
-                    </div>
-                    {segment.lyricMatch && (
-                      <div className="lyric-match">
-                        <strong>LRC 匹配</strong>
-                        <span>{segment.lyricMatch.line}</span>
-                        <small>{segment.lyricMatch.startSec}s - {segment.lyricMatch.endSec}s · {Math.round(segment.lyricMatch.confidence * 100)}%</small>
-                      </div>
-                    )}
-                    <label>
-                      歌曲片段开始
-                      <div className="cue-input-row">
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.1"
-                          value={segment.songClipStartSec}
-                          onChange={(event) => updateSegment(segment.id, { songClipStartSec: Number(event.target.value) })}
-                        />
-                        <button type="button" onClick={() => setCueFromPlayback(segment, 'songClipStartSec')} disabled={!songAudioUrl}>
-                          <Music size={16} />
-                          当前
-                        </button>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max={getCueMax(segment)}
-                        step="0.1"
-                        value={segment.songClipStartSec}
-                        onChange={(event) => updateSegment(segment.id, { songClipStartSec: Number(event.target.value) })}
-                      />
-                    </label>
-                    <label>
-                      歌曲片段结束
-                      <div className="cue-input-row">
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.1"
-                          value={segment.songClipEndSec}
-                          onChange={(event) => updateSegment(segment.id, { songClipEndSec: Number(event.target.value) })}
-                        />
-                        <button type="button" onClick={() => setCueFromPlayback(segment, 'songClipEndSec')} disabled={!songAudioUrl}>
-                          <Music size={16} />
-                          当前
-                        </button>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max={getCueMax(segment)}
-                        step="0.1"
-                        value={segment.songClipEndSec}
-                        onChange={(event) => updateSegment(segment.id, { songClipEndSec: Number(event.target.value) })}
-                      />
-                    </label>
-                  </div>
-                )}
-                <small>{segment.reason} · {Math.round((segment.confidence || 0) * 100)}%</small>
-              </article>
-            ))}
-          </div>
-
           {renderResult && (
             <div className="notice success">
               <strong>{renderResult.message}</strong>
@@ -897,8 +1182,254 @@ function App() {
           )}
         </section>
       </section>
+    </section>
+  );
+}
+
+function SegmentCard({
+  audioProps,
+  busy,
+  getCueMax,
+  isSelected,
+  project,
+  refCallback,
+  segment,
+  songFile,
+  songAudioUrl,
+  onSelect,
+  onSetCueFromPlayback,
+  onSetSongFile,
+  onUpdateSegment,
+  onUploadSong,
+}) {
+  return (
+    <article
+      ref={refCallback}
+      className={`segment ${segment.type} ${isSelected ? 'selected' : ''}`}
+      onClick={onSelect}
+    >
+      <div className="segment-head">
+        <select value={segment.type} onChange={(event) => onUpdateSegment(segment.id, { type: event.target.value })}>
+          <option value="narration">旁白</option>
+          <option value="lyric">歌词</option>
+        </select>
+        <span className="chapter-pill">{segment.chapterTitle || '正文'}</span>
+        <span>{segment.startSec}s</span>
+        <label>
+          时长
+          <input
+            type="number"
+            min="0.5"
+            step="0.1"
+            value={segment.durationSec}
+            onChange={(event) => onUpdateSegment(segment.id, { durationSec: Number(event.target.value) })}
+          />
+        </label>
+      </div>
+      <div className="voice-summary" aria-label="配音提示">
+        <span>{segment.speakerName || '旁白'}</span>
+        <span>{formatSpeakerGender(segment.speakerGender)}</span>
+        <span>{segment.emotion || 'neutral'}</span>
+        <span>{segment.voiceStyle || 'neutral_narrator'}</span>
+        <strong>{segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}</strong>
+      </div>
+      <div className="voice-controls">
+        <label>
+          说话人
+          <input
+            type="text"
+            value={segment.speakerName || '旁白'}
+            onChange={(event) => onUpdateSegment(segment.id, { speakerName: event.target.value })}
+          />
+        </label>
+        <label>
+          性别
+          <select
+            value={segment.speakerGender || 'unknown'}
+            onChange={(event) => onUpdateSegment(segment.id, { speakerGender: event.target.value })}
+          >
+            <option value="unknown">未知</option>
+            <option value="female">女声</option>
+            <option value="male">男声</option>
+          </select>
+        </label>
+        <label>
+          情绪
+          <input
+            type="text"
+            value={segment.emotion || 'neutral'}
+            onChange={(event) => onUpdateSegment(segment.id, { emotion: event.target.value })}
+          />
+        </label>
+        <label>
+          音色
+          <input
+            type="text"
+            value={segment.voiceStyle || 'neutral_narrator'}
+            onChange={(event) => onUpdateSegment(segment.id, { voiceStyle: event.target.value })}
+          />
+        </label>
+      </div>
+      <label className="delivery-control">
+        朗读方式
+        <input
+          type="text"
+          value={segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}
+          onChange={(event) => onUpdateSegment(segment.id, { delivery: event.target.value })}
+        />
+      </label>
+      <textarea value={segment.text} onChange={(event) => onUpdateSegment(segment.id, { text: event.target.value })} />
+      {segment.type === 'lyric' && (
+        <div className="lyric-controls">
+          <SongUploadPanel
+            {...audioProps}
+            busy={busy}
+            project={project}
+            songFile={songFile}
+            songAudioUrl={songAudioUrl}
+            onSetSongFile={onSetSongFile}
+            onUploadSong={onUploadSong}
+          />
+          {segment.lyricMatch && (
+            <div className="lyric-match">
+              <strong>LRC 匹配</strong>
+              <span>{segment.lyricMatch.line}</span>
+              <small>{segment.lyricMatch.startSec}s - {segment.lyricMatch.endSec}s · {Math.round(segment.lyricMatch.confidence * 100)}%</small>
+            </div>
+          )}
+          <CueControl
+            label="歌曲片段开始"
+            max={getCueMax(segment)}
+            value={segment.songClipStartSec}
+            onCapture={() => onSetCueFromPlayback(segment, 'songClipStartSec')}
+            onChange={(value) => onUpdateSegment(segment.id, { songClipStartSec: value })}
+            disabled={!songAudioUrl}
+          />
+          <CueControl
+            label="歌曲片段结束"
+            max={getCueMax(segment)}
+            value={segment.songClipEndSec}
+            onCapture={() => onSetCueFromPlayback(segment, 'songClipEndSec')}
+            onChange={(value) => onUpdateSegment(segment.id, { songClipEndSec: value })}
+            disabled={!songAudioUrl}
+          />
+        </div>
       )}
-    </main>
+      <small>{segment.reason} · {Math.round((segment.confidence || 0) * 100)}%</small>
+    </article>
+  );
+}
+
+function SongUploadPanel({
+  busy,
+  project,
+  songFile,
+  songAudioUrl,
+  setSongDurationSec,
+  setSongCursorSec,
+  onSetSongFile,
+  onUploadSong,
+}) {
+  return (
+    <div className="lyric-song-panel">
+      <label className="file-picker compact">
+        <FileAudio size={18} />
+        <span>{songFile ? songFile.name : project?.hasSong ? '替换 MP3' : '选择 MP3'}</span>
+        <input
+          type="file"
+          accept=".mp3,audio/mpeg"
+          onChange={(event) => onSetSongFile(event.target.files?.[0] || null)}
+        />
+      </label>
+      <button onClick={onUploadSong} disabled={busy || !project || !songFile}>
+        <Upload size={18} />
+        上传
+      </button>
+      {songAudioUrl && (
+        <audio
+          className="audio"
+          src={songAudioUrl}
+          controls
+          preload="metadata"
+          onLoadedMetadata={(event) => setSongDurationSec(roundSeconds(event.currentTarget.duration || 0))}
+          onTimeUpdate={(event) => setSongCursorSec(roundSeconds(event.currentTarget.currentTime || 0))}
+        />
+      )}
+    </div>
+  );
+}
+
+function CueControl({ disabled, label, max, value, onCapture, onChange }) {
+  return (
+    <label>
+      {label}
+      <div className="cue-input-row">
+        <input
+          type="number"
+          min="0"
+          step="0.1"
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+        <button type="button" onClick={onCapture} disabled={disabled}>
+          <Music size={16} />
+          当前
+        </button>
+      </div>
+      <input
+        type="range"
+        min="0"
+        max={max}
+        step="0.1"
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+    </label>
+  );
+}
+
+function SegmentNavigator({ index, segment, segments, onJumpToLyric, onSelect }) {
+  const label = getSegmentKindLabel(segment);
+  const preview = segment?.text?.replace(/\s+/g, ' ').slice(0, 80) || '暂无内容';
+
+  return (
+    <aside className={`segment-navigator ${segment?.type === 'lyric' ? 'lyric' : 'narration'}`} aria-label="分析片段定位">
+      <div className="segment-navigator-meta">
+        <span>{index + 1} / {segments.length}</span>
+        <strong>{label}</strong>
+        <span>{segment?.chapterTitle || '正文'}</span>
+      </div>
+      <input
+        type="range"
+        min="0"
+        max={segments.length - 1}
+        step="1"
+        value={index}
+        onChange={(event) => onSelect(Number(event.target.value))}
+      />
+      <div className="segment-navigator-preview">
+        <span>{preview}</span>
+        <button type="button" onClick={onJumpToLyric}>
+          <Music size={16} />
+          定位到歌词
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function AnalysisProgress({ label, phase, progress }) {
+  return (
+    <div className="analysis-progress" role="status" aria-live="polite">
+      <div className="analysis-progress-head">
+        <strong>{label}</strong>
+        <span>{Math.round(progress)}%</span>
+      </div>
+      <div className="progress-track" aria-hidden="true">
+        <div className="progress-fill" style={{ width: `${progress}%` }} />
+      </div>
+      <small>{phase}</small>
+    </div>
   );
 }
 
@@ -923,7 +1454,7 @@ function HistoryPage({
       <div className="history-toolbar">
         <button type="button" onClick={onBack}>
           <ArrowLeft size={18} />
-          返回工作台
+          返回项目输入
         </button>
         <div>
           <h2>历史项目</h2>
@@ -954,10 +1485,7 @@ function HistoryPage({
         </div>
       )}
       {projects.length === 0 ? (
-        <div className="empty-state">
-          <History size={28} />
-          <strong>暂无历史项目</strong>
-        </div>
+        <EmptyState icon={<History size={28} />} title="暂无历史项目" />
       ) : (
         <div className="history-list">
           {projects.map((item) => (
@@ -1011,6 +1539,15 @@ function PanelTitle({ icon, title }) {
     <div className="panel-title">
       {icon}
       <h2>{title}</h2>
+    </div>
+  );
+}
+
+function EmptyState({ icon, title }) {
+  return (
+    <div className="empty-state">
+      {icon}
+      <strong>{title}</strong>
     </div>
   );
 }

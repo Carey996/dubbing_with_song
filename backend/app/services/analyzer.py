@@ -353,8 +353,8 @@ def normalize_llm_analysis(
         default_chapter = segment_chapters[-1] if segment_chapters else fallback_chapters[0]
         segment_chapters = [*segment_chapters, *([default_chapter] * (len(llm_segments) - len(segment_chapters)))]
 
-    segments = []
-    cursor = 0.0
+    chapter_order = {chapter.id: index for index, chapter in enumerate(chapters or segment_chapters)}
+    segment_entries = []
     for index, item in enumerate(llm_segments):
         text = normalize_text(item.text)
         if not text:
@@ -367,28 +367,29 @@ def normalize_llm_analysis(
             song_clip_start = 0.0
             song_clip_end = 0.0
         chapter = segment_chapters[index]
-        segments.append(
-            {
-                "id": f"seg-{len(segments) + 1:03d}",
-                "index": len(segments),
-                "chapterId": chapter.id,
-                "chapterTitle": chapter.title,
-                "type": item.type,
-                "text": text,
-                "startSec": round(cursor, 2),
-                "durationSec": duration,
-                "confidence": round(float(item.confidence), 3),
-                "reason": item.reason or "LLM 分析",
-                "speakerName": normalize_segment_label(item.speakerName, "旁白"),
-                "speakerGender": item.speakerGender if item.speakerGender in {"male", "female", "unknown"} else "unknown",
-                "emotion": normalize_segment_label(item.emotion, "neutral"),
-                "voiceStyle": normalize_segment_label(item.voiceStyle, "neutral_narrator"),
-                "delivery": normalize_segment_label(item.delivery, "自然清晰，保持中文有声书旁白节奏。"),
-                "songClipStartSec": round(song_clip_start, 2),
-                "songClipEndSec": round(max(song_clip_start, song_clip_end), 2),
-            }
+        sort_offset = find_normalized_text_span(chapter.text, text)[0]
+        segment_entries.append(
+            build_segment_entry(
+                {
+                    "type": item.type,
+                    "text": text,
+                    "durationSec": duration,
+                    "confidence": round(float(item.confidence), 3),
+                    "reason": item.reason or "LLM 分析",
+                    "speakerName": normalize_segment_label(item.speakerName, "旁白"),
+                    "speakerGender": item.speakerGender if item.speakerGender in {"male", "female", "unknown"} else "unknown",
+                    "emotion": normalize_segment_label(item.emotion, "neutral"),
+                    "voiceStyle": normalize_segment_label(item.voiceStyle, "neutral_narrator"),
+                    "delivery": normalize_segment_label(item.delivery, "自然清晰，保持中文有声书旁白节奏。"),
+                    "songClipStartSec": round(song_clip_start, 2),
+                    "songClipEndSec": round(max(song_clip_start, song_clip_end), 2),
+                },
+                chapter,
+                chapter_order.get(chapter.id, len(chapter_order)),
+                sort_offset,
+                len(segment_entries),
+            )
         )
-        cursor += duration
 
     candidates = [
         {
@@ -401,7 +402,142 @@ def normalize_llm_analysis(
         for candidate in result.songCandidates
     ]
 
+    supplement_missing_candidate_lyrics(segment_entries, candidates, chapters or segment_chapters, chapter_order)
+    segments = finalize_segment_entries(segment_entries)
+
     return build_analysis(segments, candidates, engine="langchain", chapters=chapters or segment_chapters)
+
+
+def build_segment_entry(
+    payload: dict,
+    chapter: TextChapter,
+    chapter_index: int,
+    source_offset: int,
+    fallback_order: int,
+) -> dict:
+    offset = source_offset if source_offset >= 0 else 1_000_000_000 + fallback_order
+    return {
+        "chapterIndex": chapter_index,
+        "sourceOffset": offset,
+        "fallbackOrder": fallback_order,
+        "segment": {
+            **payload,
+            "chapterId": chapter.id,
+            "chapterTitle": chapter.title,
+        },
+    }
+
+
+def supplement_missing_candidate_lyrics(
+    segment_entries: list[dict],
+    candidates: list[dict],
+    chapters: list[TextChapter],
+    chapter_order: dict[str, int],
+) -> None:
+    for candidate in candidates:
+        for matched_lyrics in candidate.get("matchedLyrics") or []:
+            lyric_text = normalize_text(str(matched_lyrics))
+            if not lyric_text or lyric_text_already_segmented(segment_entries, lyric_text):
+                continue
+
+            match = find_chapter_lyric_excerpt(chapters, lyric_text)
+            if not match:
+                continue
+
+            chapter, source_offset, excerpt = match
+            duration = round(estimate_duration(excerpt, "lyric"), 2)
+            segment_entries.append(
+                build_segment_entry(
+                    {
+                        "type": "lyric",
+                        "text": excerpt,
+                        "durationSec": duration,
+                        "confidence": round(float(candidate.get("confidence", 0.8) or 0.8), 3),
+                        "reason": "根据歌曲候选歌词从原文补充为歌词片段",
+                        "songClipStartSec": 0.0,
+                        "songClipEndSec": duration,
+                    },
+                    chapter,
+                    chapter_order.get(chapter.id, len(chapter_order)),
+                    source_offset,
+                    len(segment_entries),
+                )
+            )
+
+
+def lyric_text_already_segmented(segment_entries: list[dict], lyric_text: str) -> bool:
+    target = normalize_for_text_match(lyric_text)
+    if not target:
+        return True
+    for entry in segment_entries:
+        segment = entry["segment"]
+        if segment.get("type") != "lyric":
+            continue
+        existing = normalize_for_text_match(segment.get("text", ""))
+        if target in existing or existing in target:
+            return True
+    return False
+
+
+def find_chapter_lyric_excerpt(chapters: list[TextChapter], lyric_text: str) -> tuple[TextChapter, int, str] | None:
+    for chapter in chapters:
+        start, end = find_normalized_text_span(chapter.text, lyric_text)
+        if start == -1:
+            continue
+        while end < len(chapter.text) and chapter.text[end] in "…，。！？!?、；;：:”」』’'\"":
+            end += 1
+        excerpt = normalize_text(chapter.text[start:end].strip("“”\"' \n"))
+        if excerpt:
+            return chapter, start, excerpt
+    return None
+
+
+def finalize_segment_entries(segment_entries: list[dict]) -> list[dict]:
+    cursor = 0.0
+    segments: list[dict] = []
+    for entry in sorted(segment_entries, key=lambda item: (item["chapterIndex"], item["sourceOffset"], item["fallbackOrder"])):
+        segment = dict(entry["segment"])
+        segment["id"] = f"seg-{len(segments) + 1:03d}"
+        segment["index"] = len(segments)
+        segment["startSec"] = round(cursor, 2)
+        cursor += float(segment["durationSec"])
+        segments.append(segment)
+    return segments
+
+
+def find_normalized_text_span(source: str, target: str) -> tuple[int, int]:
+    normalized_source, source_positions = normalize_with_positions(source)
+    normalized_target = normalize_for_text_match(target)
+    if not normalized_source or not normalized_target:
+        return -1, -1
+
+    start = normalized_source.find(normalized_target)
+    if start == -1:
+        return -1, -1
+
+    end = start + len(normalized_target) - 1
+    return source_positions[start], source_positions[end] + 1
+
+
+def normalize_with_positions(value: str) -> tuple[str, list[int]]:
+    chars: list[str] = []
+    positions: list[int] = []
+    for index, char in enumerate(value or ""):
+        if char.isspace():
+            continue
+        chars.append(normalize_match_char(char))
+        positions.append(index)
+    return "".join(chars), positions
+
+
+def normalize_for_text_match(value: str) -> str:
+    return "".join(normalize_match_char(char) for char in value or "" if not char.isspace())
+
+
+def normalize_match_char(char: str) -> str:
+    if char == "…":
+        return "…"
+    return char
 
 
 def build_analysis(segments: list[dict], candidates: list[dict], engine: str, chapters: list[TextChapter]) -> dict:
