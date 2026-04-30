@@ -15,6 +15,12 @@ import {
 } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
 import { advanceAnalysisProgress, completeAnalysisProgress } from './analysisProgress.js';
+import {
+  areAllProjectsSelected,
+  normalizeSelectedProjectIds,
+  selectAllProjectIds,
+  toggleProjectSelection,
+} from './projectSelection.js';
 import './styles.css';
 
 const emptyTimeline = {
@@ -32,6 +38,7 @@ function App() {
   const [chapterLrcFile, setChapterLrcFile] = useState(null);
   const [project, setProject] = useState(null);
   const [projectList, setProjectList] = useState([]);
+  const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [view, setView] = useState('workspace');
   const [analysis, setAnalysis] = useState(null);
   const [chapters, setChapters] = useState([]);
@@ -93,6 +100,10 @@ function App() {
   useEffect(() => {
     loadProjectList();
   }, []);
+
+  useEffect(() => {
+    setSelectedProjectIds((current) => normalizeSelectedProjectIds(projectList, current));
+  }, [projectList]);
 
   useEffect(() => (
     () => {
@@ -190,9 +201,34 @@ function App() {
       if (project?.id === projectId) {
         resetCurrentProject();
       }
+      setSelectedProjectIds((current) => current.filter((id) => id !== projectId));
       await loadProjectList();
     } catch (err) {
       setError(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function deleteSelectedProjects() {
+    const ids = normalizeSelectedProjectIds(projectList, selectedProjectIds);
+    if (!ids.length) return;
+    if (!window.confirm(`删除选中的 ${ids.length} 个项目？此操作会删除项目文件和生成结果。`)) return;
+
+    setBusy('deleting-projects');
+    setError('');
+    try {
+      for (const projectId of ids) {
+        await request(`/api/projects/${projectId}`, { method: 'DELETE' });
+      }
+      if (project && ids.includes(project.id)) {
+        resetCurrentProject();
+      }
+      setSelectedProjectIds([]);
+      await loadProjectList();
+    } catch (err) {
+      setError(err.message);
+      await loadProjectList();
     } finally {
       setBusy('');
     }
@@ -445,9 +481,14 @@ function App() {
           busy={busy}
           currentProjectId={project?.id || ''}
           projects={projectList}
+          selectedProjectIds={selectedProjectIds}
           onBack={() => setView('workspace')}
+          onClearSelection={() => setSelectedProjectIds([])}
           onDelete={deleteProject}
+          onDeleteSelected={deleteSelectedProjects}
           onOpen={loadProject}
+          onSelectAll={() => setSelectedProjectIds(selectAllProjectIds(projectList))}
+          onToggleSelection={(projectId) => setSelectedProjectIds((current) => toggleProjectSelection(current, projectId))}
         />
       ) : (
       <section className="workspace-grid">
@@ -705,6 +746,51 @@ function App() {
                     />
                   </label>
                 </div>
+                <div className="voice-controls">
+                  <label>
+                    说话人
+                    <input
+                      type="text"
+                      value={segment.speakerName || '旁白'}
+                      onChange={(event) => updateSegment(segment.id, { speakerName: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    性别
+                    <select
+                      value={segment.speakerGender || 'unknown'}
+                      onChange={(event) => updateSegment(segment.id, { speakerGender: event.target.value })}
+                    >
+                      <option value="unknown">未知</option>
+                      <option value="female">女声</option>
+                      <option value="male">男声</option>
+                    </select>
+                  </label>
+                  <label>
+                    情绪
+                    <input
+                      type="text"
+                      value={segment.emotion || 'neutral'}
+                      onChange={(event) => updateSegment(segment.id, { emotion: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    音色
+                    <input
+                      type="text"
+                      value={segment.voiceStyle || 'neutral_narrator'}
+                      onChange={(event) => updateSegment(segment.id, { voiceStyle: event.target.value })}
+                    />
+                  </label>
+                </div>
+                <label className="delivery-control">
+                  朗读方式
+                  <input
+                    type="text"
+                    value={segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}
+                    onChange={(event) => updateSegment(segment.id, { delivery: event.target.value })}
+                  />
+                </label>
                 <textarea value={segment.text} onChange={(event) => updateSegment(segment.id, { text: event.target.value })} />
                 {segment.type === 'lyric' && (
                   <div className="lyric-controls">
@@ -809,7 +895,22 @@ function App() {
   );
 }
 
-function HistoryPage({ busy, currentProjectId, projects, onBack, onDelete, onOpen }) {
+function HistoryPage({
+  busy,
+  currentProjectId,
+  projects,
+  selectedProjectIds,
+  onBack,
+  onClearSelection,
+  onDelete,
+  onDeleteSelected,
+  onOpen,
+  onSelectAll,
+  onToggleSelection,
+}) {
+  const selectedCount = selectedProjectIds.length;
+  const allSelected = areAllProjectsSelected(projects, selectedProjectIds);
+
   return (
     <section className="history-page">
       <div className="history-toolbar">
@@ -822,6 +923,29 @@ function HistoryPage({ busy, currentProjectId, projects, onBack, onDelete, onOpe
           <p>{projects.length} 个项目</p>
         </div>
       </div>
+      {projects.length > 0 && (
+        <div className="history-bulkbar">
+          <label className="checkbox-control">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={(event) => (event.target.checked ? onSelectAll() : onClearSelection())}
+              disabled={busy}
+            />
+            <span>全选</span>
+          </label>
+          <span>{selectedCount} 个已选</span>
+          <div className="history-bulk-actions">
+            <button type="button" onClick={onClearSelection} disabled={busy || selectedCount === 0}>
+              清空选择
+            </button>
+            <button type="button" className="danger" onClick={onDeleteSelected} disabled={busy || selectedCount === 0}>
+              <Trash2 size={18} />
+              删除选中
+            </button>
+          </div>
+        </div>
+      )}
       {projects.length === 0 ? (
         <div className="empty-state">
           <History size={28} />
@@ -830,7 +954,18 @@ function HistoryPage({ busy, currentProjectId, projects, onBack, onDelete, onOpe
       ) : (
         <div className="history-list">
           {projects.map((item) => (
-            <article key={item.id} className={`history-card ${currentProjectId === item.id ? 'active' : ''}`}>
+            <article
+              key={item.id}
+              className={`history-card ${currentProjectId === item.id ? 'active' : ''} ${selectedProjectIds.includes(item.id) ? 'selected' : ''}`}
+            >
+              <label className="history-select" aria-label={`选择 ${item.title || item.id}`}>
+                <input
+                  type="checkbox"
+                  checked={selectedProjectIds.includes(item.id)}
+                  onChange={() => onToggleSelection(item.id)}
+                  disabled={busy}
+                />
+              </label>
               <div className="history-card-main">
                 <strong>{item.title || item.id}</strong>
                 <span>{item.id}</span>

@@ -347,6 +347,11 @@ def normalize_segments(segments: list[dict]) -> list[dict]:
                 "durationSec": round(duration, 2),
                 "confidence": float(segment.get("confidence", 0.5) or 0.5),
                 "reason": str(segment.get("reason") or ""),
+                "speakerName": normalize_segment_text(segment.get("speakerName"), "旁白"),
+                "speakerGender": normalize_speaker_gender(segment.get("speakerGender")),
+                "emotion": normalize_segment_text(segment.get("emotion"), "neutral"),
+                "voiceStyle": normalize_segment_text(segment.get("voiceStyle"), "neutral_narrator"),
+                "delivery": normalize_segment_text(segment.get("delivery"), "自然清晰，保持中文有声书旁白节奏。"),
                 "songClipStartSec": max(0.0, float(segment.get("songClipStartSec", 0.0) or 0.0)),
                 "songClipEndSec": max(0.0, float(segment.get("songClipEndSec", duration) or duration)),
                 **({"chapterId": str(segment.get("chapterId"))} if segment.get("chapterId") else {}),
@@ -356,6 +361,16 @@ def normalize_segments(segments: list[dict]) -> list[dict]:
         )
         cursor += duration
     return normalized
+
+
+def normalize_segment_text(value, fallback: str) -> str:
+    normalized = str(value or "").strip()
+    return normalized or fallback
+
+
+def normalize_speaker_gender(value) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"male", "female", "unknown"} else "unknown"
 
 
 def clamp_float(value: Any, min_value: float, max_value: float) -> float:

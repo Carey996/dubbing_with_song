@@ -364,6 +364,38 @@ def test_llm_analysis_accepts_missing_optional_segment_fields():
 
     assert normalized["segments"][0]["confidence"] == 0.6
     assert normalized["segments"][0]["reason"] == "LLM 未提供原因"
+    assert normalized["segments"][0]["speakerName"] == "旁白"
+    assert normalized["segments"][0]["speakerGender"] == "unknown"
+    assert normalized["segments"][0]["emotion"] == "neutral"
+    assert normalized["segments"][0]["voiceStyle"] == "neutral_narrator"
+    assert normalized["segments"][0]["delivery"]
+
+
+def test_llm_analysis_preserves_segment_voice_metadata():
+    result = analyzer.LlmAnalysis.model_validate(
+        {
+            "segments": [
+                {
+                    "type": "narration",
+                    "text": "沈红鱼低声说：“别过去。”",
+                    "speakerName": "沈红鱼",
+                    "speakerGender": "female",
+                    "emotion": "tense",
+                    "voiceStyle": "young_female_soft",
+                    "delivery": "压低声音，语速略快，带紧张感。",
+                }
+            ]
+        }
+    )
+
+    normalized = analyzer.normalize_llm_analysis([], result, "沈红鱼低声说：“别过去。”")
+    segment = normalized["segments"][0]
+
+    assert segment["speakerName"] == "沈红鱼"
+    assert segment["speakerGender"] == "female"
+    assert segment["emotion"] == "tense"
+    assert segment["voiceStyle"] == "young_female_soft"
+    assert segment["delivery"] == "压低声音，语速略快，带紧张感。"
 
 
 def test_llm_prompt_keeps_audience_chants_as_narration():
@@ -380,6 +412,17 @@ def test_llm_prompt_limits_segments_per_chunk():
 
     assert "每个分块最多输出 12 个 segments" in rendered
     assert "连续 narration 尽量合并" in rendered
+
+
+def test_llm_prompt_requests_speaker_emotion_and_voice_fields():
+    prompt = analyzer.build_prompt(ChatPromptTemplate, analyzer.get_format_instructions())
+    rendered = prompt.format(text="沈红鱼低声说：“别过去。” 江宇怒吼：“让开！”")
+
+    assert "speakerName" in rendered
+    assert "speakerGender" in rendered
+    assert "emotion" in rendered
+    assert "voiceStyle" in rendered
+    assert "delivery" in rendered
 
 
 def test_parse_llm_analysis_drops_empty_segment_objects():
@@ -621,6 +664,40 @@ def test_lyric_detection_and_timeline_update(monkeypatch):
     assert updated.json()["bgmVolume"] == 0.3
 
 
+def test_timeline_update_preserves_voice_metadata():
+    project_id = client.post("/api/projects", json={"text": "沈红鱼低声说：“别过去。”"}).json()["id"]
+    timeline = {
+        "songStartSec": 0,
+        "bgmVolume": 0.2,
+        "segments": [
+            {
+                "id": "seg-001",
+                "index": 0,
+                "type": "narration",
+                "text": "沈红鱼低声说：“别过去。”",
+                "startSec": 0,
+                "durationSec": 3,
+                "confidence": 0.9,
+                "reason": "角色对白",
+                "speakerName": "沈红鱼",
+                "speakerGender": "female",
+                "emotion": "tense",
+                "voiceStyle": "young_female_soft",
+                "delivery": "压低声音，语速略快，带紧张感。",
+            }
+        ],
+    }
+
+    updated = client.patch(f"/api/projects/{project_id}/timeline", json=timeline)
+    segment = updated.json()["segments"][0]
+
+    assert segment["speakerName"] == "沈红鱼"
+    assert segment["speakerGender"] == "female"
+    assert segment["emotion"] == "tense"
+    assert segment["voiceStyle"] == "young_female_soft"
+    assert segment["delivery"] == "压低声音，语速略快，带紧张感。"
+
+
 def test_song_upload_accepts_mp3_file():
     project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
     content = b"ID3\x03\x00\x00\x00\x00\x00\x00"
@@ -694,6 +771,109 @@ def test_synthesize_wav_uses_openai_speech_provider(monkeypatch):
     assert calls[1]["input"] == "测试旁白"
     assert calls[1]["response_format"] == "wav"
     assert calls[1]["instructions"] == renderer.DEFAULT_TTS_INSTRUCTIONS
+
+
+def test_build_narration_track_passes_voice_metadata_to_tts(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    chunks_dir = TEST_TMP_DIR / "voice-chunks"
+    output_path = TEST_TMP_DIR / "voice-narration.wav"
+    received_segments = []
+
+    def fake_synthesize(text, path, segment=None):
+        received_segments.append(segment)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        renderer.create_silence_wav(path, 0.1, (1, 2, 22050))
+
+    monkeypatch.setattr(renderer, "synthesize_wav", fake_synthesize)
+    timeline = {
+        "segments": [
+            {
+                "id": "seg-001",
+                "type": "narration",
+                "text": "江宇怒吼：“让开！”",
+                "durationSec": 1,
+                "speakerName": "江宇",
+                "speakerGender": "male",
+                "emotion": "angry",
+                "voiceStyle": "young_male_bright",
+                "delivery": "提高音量，语气急促愤怒。",
+            }
+        ]
+    }
+
+    renderer.build_narration_track(timeline, chunks_dir, output_path, include_lyrics=True)
+
+    assert received_segments[0]["speakerName"] == "江宇"
+    assert received_segments[0]["speakerGender"] == "male"
+    assert received_segments[0]["emotion"] == "angry"
+    assert received_segments[0]["delivery"] == "提高音量，语气急促愤怒。"
+
+
+def test_synthesize_wav_applies_segment_voice_and_delivery(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    output_path = TEST_TMP_DIR / "speech-segment-style.wav"
+    calls = []
+
+    class FakeSpeech:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return self
+
+        def write_to_file(self, path):
+            Path(path).write_bytes(b"RIFFfakeWAVE")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.append({"client": kwargs})
+            self.audio = type("Audio", (), {"speech": FakeSpeech()})()
+
+    monkeypatch.setenv("TTS_PROVIDER", "openai")
+    monkeypatch.setenv("TTS_API_KEY", "local-key")
+    monkeypatch.setenv("TTS_MODEL", "local-tts")
+    monkeypatch.setenv("TTS_VOICE_MALE", "onyx")
+    monkeypatch.setattr(renderer, "OpenAI", FakeOpenAI)
+
+    renderer.synthesize_wav(
+        "江宇怒吼：“让开！”",
+        output_path,
+        segment={
+            "speakerName": "江宇",
+            "speakerGender": "male",
+            "emotion": "angry",
+            "voiceStyle": "young_male_bright",
+            "delivery": "提高音量，语气急促愤怒。",
+        },
+    )
+
+    assert calls[1]["voice"] == "onyx"
+    assert "江宇" in calls[1]["instructions"]
+    assert "male" in calls[1]["instructions"]
+    assert "angry" in calls[1]["instructions"]
+    assert "提高音量，语气急促愤怒。" in calls[1]["instructions"]
+
+
+def test_gemini_tts_input_uses_emotion_style_tags(monkeypatch):
+    monkeypatch.delenv("TTS_INSTRUCTIONS", raising=False)
+
+    styled = renderer.build_tts_input(
+        "沈红鱼低声说：“别过去。”",
+        "google/gemini-3.1-flash-tts-preview",
+        {"emotion": "tense", "delivery": "压低声音，语速略快。"},
+    )
+
+    assert styled == "[whispers] 沈红鱼低声说：“别过去。”"
+
+
+def test_blank_tts_instructions_disables_gemini_style_tags(monkeypatch):
+    monkeypatch.setenv("TTS_INSTRUCTIONS", "   ")
+
+    styled = renderer.build_tts_input(
+        "沈红鱼低声说：“别过去。”",
+        "google/gemini-3.1-flash-tts-preview",
+        {"emotion": "tense", "delivery": "压低声音，语速略快。"},
+    )
+
+    assert styled == "沈红鱼低声说：“别过去。”"
 
 
 def test_synthesize_wav_allows_tts_instruction_override(monkeypatch):

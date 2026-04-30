@@ -330,6 +330,7 @@ textarea {
 }
 
 input[type="number"],
+input[type="text"],
 select {
   height: 38px;
   border: 1px solid #c9d2dc;
@@ -515,6 +516,27 @@ input[type="range"] {
   width: 100%;
 }
 
+.voice-controls {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(96px, 120px) minmax(110px, 140px) minmax(150px, 1fr);
+  gap: 10px;
+}
+
+.voice-controls label,
+.delivery-control {
+  color: #405365;
+  font-size: 13px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.voice-controls input,
+.voice-controls select,
+.delivery-control input {
+  width: 100%;
+}
+
 .segment textarea {
   min-height: 96px;
 }
@@ -616,6 +638,49 @@ input[type="range"] {
   text-align: right;
 }
 
+.history-bulkbar {
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-bulkbar > span {
+  color: #5b6f7f;
+  font-size: 13px;
+}
+
+.checkbox-control,
+.history-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-control {
+  color: #405365;
+  font-size: 13px;
+}
+
+.checkbox-control input,
+.history-select input {
+  width: 16px;
+  height: 16px;
+  accent-color: #176b87;
+}
+
+.history-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .history-list {
   display: grid;
   gap: 12px;
@@ -627,7 +692,7 @@ input[type="range"] {
   background: #ffffff;
   padding: 14px;
   display: grid;
-  grid-template-columns: minmax(220px, 1.2fr) minmax(220px, 1fr) minmax(260px, 1.1fr) auto;
+  grid-template-columns: 24px minmax(220px, 1.2fr) minmax(220px, 1fr) minmax(260px, 1.1fr) auto;
   gap: 16px;
   align-items: center;
 }
@@ -635,6 +700,10 @@ input[type="range"] {
 .history-card.active {
   border-color: #176b87;
   background: #f2fbfd;
+}
+
+.history-card.selected {
+  box-shadow: inset 3px 0 0 #176b87;
 }
 
 .history-card-main,
@@ -705,6 +774,7 @@ input[type="range"] {
 
   .topbar,
   .toolbar,
+  .history-bulkbar,
   .history-toolbar {
     align-items: stretch;
     flex-direction: column;
@@ -723,11 +793,16 @@ input[type="range"] {
 
   .workspace-grid,
   .mix-controls,
+  .voice-controls,
   .lyric-controls,
   .lyric-song-panel,
   .chapter-upload-grid,
   .history-card {
     grid-template-columns: 1fr;
+  }
+
+  .history-bulk-actions {
+    justify-content: flex-start;
   }
 
   .history-actions {
