@@ -22,12 +22,14 @@ import {
   toggleProjectSelection,
 } from './projectSelection.js';
 import {
+  buildSegmentProgressBackground,
   filterSegmentsByChapter,
   getClosestSegmentIndexByViewportCenter,
   getNearestLyricSegmentIndex,
   getSegmentKindLabel,
   getSelectedSegment,
   normalizeSegmentIndex,
+  shouldShowTtsControls,
 } from './segmentNavigator.js';
 import {
   buildWorkflowPath,
@@ -1202,6 +1204,8 @@ function SegmentCard({
   onUpdateSegment,
   onUploadSong,
 }) {
+  const showTtsControls = shouldShowTtsControls(segment);
+
   return (
     <article
       ref={refCallback}
@@ -1226,58 +1230,66 @@ function SegmentCard({
           />
         </label>
       </div>
-      <div className="voice-summary" aria-label="配音提示">
-        <span>{segment.speakerName || '旁白'}</span>
-        <span>{formatSpeakerGender(segment.speakerGender)}</span>
-        <span>{segment.emotion || 'neutral'}</span>
-        <span>{segment.voiceStyle || 'neutral_narrator'}</span>
-        <strong>{segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}</strong>
-      </div>
-      <div className="voice-controls">
-        <label>
-          说话人
-          <input
-            type="text"
-            value={segment.speakerName || '旁白'}
-            onChange={(event) => onUpdateSegment(segment.id, { speakerName: event.target.value })}
-          />
-        </label>
-        <label>
-          性别
-          <select
-            value={segment.speakerGender || 'unknown'}
-            onChange={(event) => onUpdateSegment(segment.id, { speakerGender: event.target.value })}
-          >
-            <option value="unknown">未知</option>
-            <option value="female">女声</option>
-            <option value="male">男声</option>
-          </select>
-        </label>
-        <label>
-          情绪
-          <input
-            type="text"
-            value={segment.emotion || 'neutral'}
-            onChange={(event) => onUpdateSegment(segment.id, { emotion: event.target.value })}
-          />
-        </label>
-        <label>
-          音色
-          <input
-            type="text"
-            value={segment.voiceStyle || 'neutral_narrator'}
-            onChange={(event) => onUpdateSegment(segment.id, { voiceStyle: event.target.value })}
-          />
-        </label>
-      </div>
-      <label className="delivery-control">
-        朗读方式
-        <input
-          type="text"
-          value={segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}
-          onChange={(event) => onUpdateSegment(segment.id, { delivery: event.target.value })}
-        />
-      </label>
+      {showTtsControls ? (
+        <>
+          <div className="voice-summary" aria-label="配音提示">
+            <span>{segment.speakerName || '旁白'}</span>
+            <span>{formatSpeakerGender(segment.speakerGender)}</span>
+            <span>{segment.emotion || 'neutral'}</span>
+            <span>{segment.voiceStyle || 'neutral_narrator'}</span>
+            <strong>{segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}</strong>
+          </div>
+          <div className="voice-controls">
+            <label>
+              说话人
+              <input
+                type="text"
+                value={segment.speakerName || '旁白'}
+                onChange={(event) => onUpdateSegment(segment.id, { speakerName: event.target.value })}
+              />
+            </label>
+            <label>
+              性别
+              <select
+                value={segment.speakerGender || 'unknown'}
+                onChange={(event) => onUpdateSegment(segment.id, { speakerGender: event.target.value })}
+              >
+                <option value="unknown">未知</option>
+                <option value="female">女声</option>
+                <option value="male">男声</option>
+              </select>
+            </label>
+            <label>
+              情绪
+              <input
+                type="text"
+                value={segment.emotion || 'neutral'}
+                onChange={(event) => onUpdateSegment(segment.id, { emotion: event.target.value })}
+              />
+            </label>
+            <label>
+              音色
+              <input
+                type="text"
+                value={segment.voiceStyle || 'neutral_narrator'}
+                onChange={(event) => onUpdateSegment(segment.id, { voiceStyle: event.target.value })}
+              />
+            </label>
+          </div>
+          <label className="delivery-control">
+            朗读方式
+            <input
+              type="text"
+              value={segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}
+              onChange={(event) => onUpdateSegment(segment.id, { delivery: event.target.value })}
+            />
+          </label>
+        </>
+      ) : (
+        <div className="lyric-tts-note">
+          歌词片段不会发送给 AI TTS。上传 MP3 后，用下方卡点控制决定这段歌词在歌曲里的开始和结束。
+        </div>
+      )}
       <textarea value={segment.text} onChange={(event) => onUpdateSegment(segment.id, { text: event.target.value })} />
       {segment.type === 'lyric' && (
         <div className="lyric-controls">
@@ -1391,6 +1403,7 @@ function CueControl({ disabled, label, max, value, onCapture, onChange }) {
 function SegmentNavigator({ index, segment, segments, onJumpToLyric, onSelect }) {
   const label = getSegmentKindLabel(segment);
   const preview = segment?.text?.replace(/\s+/g, ' ').slice(0, 80) || '暂无内容';
+  const progressBackground = buildSegmentProgressBackground(segments);
 
   return (
     <aside className={`segment-navigator ${segment?.type === 'lyric' ? 'lyric' : 'narration'}`} aria-label="分析片段定位">
@@ -1405,6 +1418,7 @@ function SegmentNavigator({ index, segment, segments, onJumpToLyric, onSelect })
         max={segments.length - 1}
         step="1"
         value={index}
+        style={{ background: progressBackground }}
         onChange={(event) => onSelect(Number(event.target.value))}
       />
       <div className="segment-navigator-preview">

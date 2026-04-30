@@ -27,6 +27,39 @@ export function getSegmentKindLabel(segment) {
   return segment?.type === 'lyric' ? '歌词' : '普通文本';
 }
 
+export function shouldShowTtsControls(segment) {
+  return segment?.type !== 'lyric';
+}
+
+export function buildSegmentProgressBackground(segments) {
+  if (!segments.length || !segments.some((segment) => segment.type === 'lyric')) {
+    return '#dbe6ee';
+  }
+
+  if (segments.length === 1) {
+    return segments[0].type === 'lyric' ? '#f2a65a' : '#dbe6ee';
+  }
+
+  const stops = [];
+  const lastIndex = segments.length - 1;
+  for (let index = 0; index < segments.length; index += 1) {
+    const start = Math.max(0, ((index - 0.5) / lastIndex) * 100);
+    const end = Math.min(100, ((index + 0.5) / lastIndex) * 100);
+    const color = segments[index].type === 'lyric' ? '#f2a65a' : '#dbe6ee';
+    const previous = stops[stops.length - 1];
+    if (previous?.color === color && Math.abs(previous.end - start) < 0.01) {
+      previous.end = end;
+    } else {
+      stops.push({ color, start, end });
+    }
+  }
+
+  const cssStops = stops
+    .map((stop) => `${stop.color} ${stop.start.toFixed(2)}% ${stop.end.toFixed(2)}%`)
+    .join(', ');
+  return `linear-gradient(to right, ${cssStops})`;
+}
+
 export function getNearestLyricSegmentIndex(segments, startIndex) {
   if (!segments.length) return 0;
   const normalizedStart = normalizeSegmentIndex(startIndex, segments);

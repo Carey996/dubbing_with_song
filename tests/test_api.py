@@ -852,6 +852,37 @@ def test_build_narration_track_passes_voice_metadata_to_tts(monkeypatch):
     assert received_segments[0]["delivery"] == "提高音量，语气急促愤怒。"
 
 
+def test_build_narration_track_adds_segment_context_to_tts_failure(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    chunks_dir = TEST_TMP_DIR / "failure-context-chunks"
+    output_path = TEST_TMP_DIR / "failure-context.wav"
+
+    def fake_synthesize(_text, _path, segment=None):
+        raise HTTPException(status_code=503, detail="OpenRouter TTS provider rejected this input.")
+
+    monkeypatch.setattr(renderer, "synthesize_wav", fake_synthesize)
+    timeline = {
+        "segments": [
+            {
+                "id": "seg-002",
+                "index": 1,
+                "type": "narration",
+                "text": "“江宇滚出娱乐圈！”",
+                "durationSec": 1,
+            }
+        ]
+    }
+
+    with pytest.raises(HTTPException) as exc:
+        renderer.build_narration_track(timeline, chunks_dir, output_path, include_lyrics=False)
+
+    assert exc.value.status_code == 503
+    detail = str(exc.value.detail)
+    assert "seg-002" in detail
+    assert "第 2 段" in detail
+    assert "江宇滚出娱乐圈" in detail
+
+
 def test_synthesize_wav_applies_segment_voice_and_delivery(monkeypatch):
     TEST_TMP_DIR.mkdir(exist_ok=True)
     output_path = TEST_TMP_DIR / "speech-segment-style.wav"
@@ -1132,7 +1163,9 @@ def test_openrouter_provider_403_has_actionable_detail(monkeypatch):
 
     assert exc.value.status_code == 503
     detail = str(exc.value.detail)
-    assert "OpenRouter TTS provider rejected this input" in detail
+    assert "OpenRouter TTS provider rejected the speech request" in detail
+    assert "account, model" in detail
+    assert "TTS_MODEL=" in detail
     assert "lyric" in detail
 
 

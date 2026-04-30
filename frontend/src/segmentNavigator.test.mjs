@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 
 import {
+  buildSegmentProgressBackground,
   filterSegmentsByChapter,
   getClosestSegmentIndexByViewportCenter,
   getNearestLyricSegmentIndex,
   getSegmentKindLabel,
   getSelectedSegment,
   normalizeSegmentIndex,
+  shouldShowTtsControls,
 } from './segmentNavigator.js';
 
 const segments = [
@@ -25,9 +27,16 @@ assert.equal(getSelectedSegment([], 1).segment, null);
 
 assert.equal(getSegmentKindLabel(segments[0]), '普通文本');
 assert.equal(getSegmentKindLabel(segments[1]), '歌词');
+assert.equal(shouldShowTtsControls(segments[0]), true);
+assert.equal(shouldShowTtsControls(segments[1]), false);
 assert.equal(getNearestLyricSegmentIndex(segments, 0), 1);
 assert.equal(getNearestLyricSegmentIndex(segments, 2), 1);
 assert.equal(getNearestLyricSegmentIndex([segments[0], segments[2]], 0), 0);
+assert.equal(
+  buildSegmentProgressBackground(segments),
+  'linear-gradient(to right, #dbe6ee 0.00% 25.00%, #f2a65a 25.00% 75.00%, #dbe6ee 75.00% 100.00%)',
+);
+assert.equal(buildSegmentProgressBackground([segments[0], segments[2]]), '#dbe6ee');
 assert.deepEqual(filterSegmentsByChapter(segments, null), segments);
 assert.deepEqual(filterSegmentsByChapter(segments, { id: 'chap-001', title: '第一章' }), [segments[0], segments[1]]);
 assert.deepEqual(filterSegmentsByChapter(segments, { id: 'missing', title: '第一章' }), [segments[0], segments[1]]);

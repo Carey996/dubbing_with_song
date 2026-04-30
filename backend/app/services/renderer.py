@@ -80,7 +80,13 @@ def build_narration_track(timeline: dict, chunks_dir: Path, output_path: Path, i
                 sample_template = (1, 2, 22050)
             create_silence_wav(chunk_path, duration, sample_template)
         else:
-            synthesize_wav(text, chunk_path, segment=segment)
+            try:
+                synthesize_wav(text, chunk_path, segment=segment)
+            except HTTPException as exc:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=build_segment_tts_failure_detail(segment, exc.detail),
+                ) from exc
             with wave.open(str(chunk_path), "rb") as wav:
                 sample_template = (wav.getnchannels(), wav.getsampwidth(), wav.getframerate())
 
@@ -95,6 +101,21 @@ def build_narration_track(timeline: dict, chunks_dir: Path, output_path: Path, i
 
 def has_lyric_segments(timeline: dict) -> bool:
     return any(segment.get("type") == "lyric" for segment in timeline.get("segments") or [])
+
+
+def build_segment_tts_failure_detail(segment: dict, original_detail) -> str:
+    segment_id = str(segment.get("id") or "unknown")
+    segment_number = int(segment.get("index", 0) or 0) + 1
+    kind = "歌词" if segment.get("type") == "lyric" else "普通文本"
+    preview = " ".join(str(segment.get("text") or "").split())[:80]
+    guidance = (
+        "这段当前会发送给 AI TTS；如果它其实是歌词，请把片段类型改为“歌词”，"
+        "上传 MP3 并设置歌曲片段开始/结束；如果它不是歌词，则需要改写该段或切换可接受这类文本的 TTS 服务。"
+    ) if kind != "歌词" else "歌词片段不应进入 AI TTS，请检查时间轴是否已保存为歌词类型。"
+    return (
+        f"TTS 合成失败：第 {segment_number} 段 ({segment_id})，类型：{kind}。"
+        f"片段预览：{preview or '空内容'}。{guidance}原始错误：{original_detail}"
+    )
 
 
 def resolve_lyric_segment_song_paths(project: Project, timeline: dict) -> dict[str, Path]:
@@ -367,9 +388,13 @@ def build_tts_failure_detail(
         return (
             503,
             (
-                "OpenRouter TTS provider rejected this input due to provider policy/moderation. "
-                "If the rejected text is a lyric or song-like segment, upload the MP3 and align that lyric segment "
-                "instead of synthesizing it with TTS. "
+                "OpenRouter TTS provider rejected the speech request due to provider policy/moderation. "
+                "If a tiny harmless test sentence is also rejected, this is likely an OpenRouter account, model, "
+                "or upstream speech-provider access issue rather than a timeline text issue. "
+                f"Check TTS_MODEL={model}, TTS_VOICE={voice}, TTS_RESPONSE_FORMAT={response_format}, "
+                "OpenRouter key/credits, and whether the selected provider currently allows audio speech. "
+                "If the rejected segment is actually a lyric or song-like segment, upload the MP3 and align that "
+                "lyric segment instead of synthesizing it with TTS. "
                 f"Original error: {original}"
             ),
         )

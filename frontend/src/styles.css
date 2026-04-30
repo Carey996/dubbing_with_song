@@ -651,6 +651,7 @@ input[type="range"] {
 
 .segment.lyric {
   border-left: 4px solid #f2a65a;
+  background: #fffaf0;
 }
 
 .segment.narration {
@@ -660,6 +661,11 @@ input[type="range"] {
 .segment.selected {
   box-shadow: 0 0 0 3px rgba(23, 107, 135, 0.18);
   border-color: #176b87;
+}
+
+.segment.lyric.selected {
+  box-shadow: 0 0 0 3px rgba(242, 166, 90, 0.28);
+  border-color: #d88931;
 }
 
 .segment-head {
@@ -710,6 +716,16 @@ input[type="range"] {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.6;
+}
+
+.lyric-tts-note {
+  border: 1px solid #e5c48e;
+  border-radius: 8px;
+  background: #fff5dd;
+  color: #6a4616;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 10px 12px;
 }
 
 .voice-controls {
@@ -834,6 +850,16 @@ input[type="range"] {
 
 .segment-navigator.lyric {
   border-left-color: #f2a65a;
+}
+
+.segment-navigator input[type="range"] {
+  height: 8px;
+  border-radius: 999px;
+  accent-color: #176b87;
+}
+
+.segment-navigator.lyric input[type="range"] {
+  accent-color: #d88931;
 }
 
 .segment-navigator-meta,
