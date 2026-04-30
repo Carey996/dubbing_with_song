@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
+import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -186,6 +187,7 @@ def save_analysis(
     chapter_title: str | None = None,
 ) -> dict:
     project = get_project(project_id)
+    analysis = normalize_analysis_segments(analysis)
     now = datetime.now(timezone.utc).isoformat()
     analysis_id = uuid.uuid4().hex[:12]
     analysis_dir = project.root / "analysis"
@@ -210,6 +212,15 @@ def save_analysis(
         created_at=now,
     )
     return {"id": analysis_id, **analysis}
+
+
+def normalize_analysis_segments(analysis: dict) -> dict:
+    normalized = copy.deepcopy(analysis)
+    segments = normalize_segments(normalized.get("segments") or [])
+    normalized["segments"] = segments
+    if isinstance(normalized.get("timeline"), dict):
+        normalized["timeline"]["segments"] = normalize_segments(normalized["timeline"].get("segments") or segments)
+    return normalized
 
 
 def list_analyses(project_id: str) -> list[dict]:

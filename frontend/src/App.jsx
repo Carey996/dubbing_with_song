@@ -746,6 +746,13 @@ function App() {
                     />
                   </label>
                 </div>
+                <div className="voice-summary" aria-label="配音提示">
+                  <span>{segment.speakerName || '旁白'}</span>
+                  <span>{formatSpeakerGender(segment.speakerGender)}</span>
+                  <span>{segment.emotion || 'neutral'}</span>
+                  <span>{segment.voiceStyle || 'neutral_narrator'}</span>
+                  <strong>{segment.delivery || '自然清晰，保持中文有声书旁白节奏。'}</strong>
+                </div>
                 <div className="voice-controls">
                   <label>
                     说话人
@@ -1024,6 +1031,12 @@ function formatDateTime(value) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function formatSpeakerGender(value) {
+  if (value === 'female') return '女声';
+  if (value === 'male') return '男声';
+  return '未知声线';
 }
 
 async function request(url, options = {}) {

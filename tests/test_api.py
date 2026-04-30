@@ -133,6 +133,8 @@ def test_full_analysis_is_persisted_with_history(monkeypatch):
     assert history.json()["analyses"][0]["status"] == "succeeded"
     assert detail.json()["analysis"]["analysisEngine"] == "test-double"
     assert detail.json()["timeline"]["segments"]
+    assert detail.json()["timeline"]["segments"][0]["speakerName"] == "旁白"
+    assert detail.json()["timeline"]["segments"][0]["emotion"] == "neutral"
 
 
 def test_chapter_analysis_is_persisted_with_scope(monkeypatch):

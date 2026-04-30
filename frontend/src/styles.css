@@ -516,6 +516,34 @@ input[type="range"] {
   width: 100%;
 }
 
+.voice-summary {
+  border: 1px solid #d4dde6;
+  border-radius: 8px;
+  background: #f7fafc;
+  color: #405365;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 10px;
+}
+
+.voice-summary span {
+  border: 1px solid #d4dde6;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #405365;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.voice-summary strong {
+  color: #1f2a37;
+  flex: 1 1 240px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
 .voice-controls {
   display: grid;
   grid-template-columns: minmax(120px, 1fr) minmax(96px, 120px) minmax(110px, 140px) minmax(150px, 1fr);
