@@ -1,4 +1,5 @@
 .venv/
+venv/
 .env
 __pycache__/
 .pytest_cache/
@@ -7,8 +8,10 @@ __pycache__/
 .codex-run/
 pytest-cache-files-*/
 node_modules/
+tools/ffmpeg/
 dist/
 data/
 logs/
 *.pyc
 *.log
+.DS_Store

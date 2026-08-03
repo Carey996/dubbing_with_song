@@ -56,7 +56,7 @@ TTS_VOICE_POOL_FEMALE=nova,shimmer
 
 如果正文是中文旁白，不要把 `TTS_MODEL` 配成 `mistralai/voxtral-*`。后端会在中文输入 + Voxtral TTS 组合下直接返回配置错误，避免等到 OpenRouter provider 侧报 `No successful provider responses`。
 
-项目已内置 Windows x64 版 `ffmpeg`，默认路径是 `tools\ffmpeg\windows-x64\ffmpeg.exe`，无需额外安装。需要临时切换时，可以显式配置：
+仓库不提交 `ffmpeg` 二进制文件。请自行安装 `ffmpeg` 并确保它位于系统 `PATH` 中，或者显式配置本地可执行文件路径：
 
 ```env
 FFMPEG_PATH=D:\path\to\ffmpeg.exe
@@ -117,7 +117,7 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节
 
 `POST /api/projects` 只接受 JSON：`{"text": "..."}`。txt 文件上传独立走 `POST /api/projects/text-file`，后端解码为文本后复用同一个项目创建服务入口。MP3 上传独立走 `POST /api/projects/{id}/song-file` 的 multipart 表单，避免创建接口同时兼容多种输入格式。
 
-后端 TTS 必须配置可用的 AI speech API。没有 `TTS_API_KEY`、TTS 服务不可用，或 OpenRouter MP3 无法通过内置 `ffmpeg` 转成 WAV 时，渲染接口会直接返回错误，不再降级生成 PowerShell 语音或静音占位。
+后端 TTS 必须配置可用的 AI speech API。没有 `TTS_API_KEY`、TTS 服务不可用，或 OpenRouter MP3 无法通过本机 `ffmpeg` 转成 WAV 时，渲染接口会直接返回错误，不再降级生成 PowerShell 语音或静音占位。
 
 ## 后续增强
 
