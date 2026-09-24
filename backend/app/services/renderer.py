@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -526,12 +527,12 @@ def mix_with_song(
         song_inputs = [str(path) for path in song_paths]
     else:
         song_start = float(timeline.get("songStartSec", 0.0) or 0.0)
+        bgm_source, song_input_options = build_bgm_source(ffmpeg, song_path, song_start, duration, output_path.parent)
         filter_graph = (
             f"[1:a]volume={bgm_volume},atrim=0:{duration:.3f},asetpts=PTS-STARTPTS[bgm];"
             "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[out]"
         )
-        song_input_options = ["-stream_loop", "-1", "-ss", f"{song_start:.3f}"]
-        song_inputs = [str(song_path)]
+        song_inputs = [str(bgm_source if bgm_source is not None else song_path)]
 
     command = [
         ffmpeg,
@@ -553,6 +554,87 @@ def mix_with_song(
     result = subprocess.run(command, capture_output=True, text=True, timeout=180)
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"ffmpeg render failed: {result.stderr[-800:]}")
+
+
+def build_bgm_source(
+    ffmpeg: str,
+    song_path: Path,
+    song_start: float,
+    duration: float,
+    work_dir: Path,
+) -> tuple[Path | None, list[str]]:
+    """Cut the song at the configured start offset and loop that cut to cover the narration.
+
+    ffmpeg's input-level ``-stream_loop`` combined with ``-ss`` only seeks the first pass and
+    restarts every later pass at 0s, which drops the user's song start. Decoding the cut once
+    and looping it with the ``aloop`` filter keeps the offset for every repetition.
+    """
+    song_start = max(0.0, song_start)
+    if song_start <= 0:
+        return None, ["-stream_loop", "-1", "-ss", f"{song_start:.3f}"]
+
+    song_duration = probe_audio_duration(ffmpeg, song_path)
+    remaining = song_duration - song_start
+    if song_duration <= 0 or remaining <= 0:
+        # Unknown length or the start offset is past the end of the song: keep the old behaviour.
+        return None, ["-stream_loop", "-1", "-ss", f"{song_start:.3f}"]
+    if remaining >= duration:
+        return None, ["-ss", f"{song_start:.3f}"]
+
+    sample_rate = 22050
+    loop_size = int(round(remaining * sample_rate))
+    loop_count = max(1, math.ceil(duration / remaining))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    bgm_path = work_dir / "bgm-loop.wav"
+    command = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        f"{song_start:.3f}",
+        "-i",
+        str(song_path),
+        "-filter_complex",
+        f"[0:a]asetpts=PTS-STARTPTS,aloop=loop={loop_count}:size={loop_size},"
+        f"atrim=0:{duration:.3f},asetpts=PTS-STARTPTS[bgm]",
+        "-map",
+        "[bgm]",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-c:a",
+        "pcm_s16le",
+        str(bgm_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0 or not bgm_path.exists() or bgm_path.stat().st_size == 0:
+        return None, ["-stream_loop", "-1", "-ss", f"{song_start:.3f}"]
+    return bgm_path, []
+
+
+def probe_audio_duration(ffmpeg: str, path: Path) -> float:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        candidate = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+        ffprobe = str(candidate) if candidate.is_file() else None
+    if not ffprobe:
+        return 0.0
+
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        return float(result.stdout.strip()) if result.returncode == 0 else 0.0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
 
 
 def build_lyric_clip_specs(timeline: dict, default_song_path: Path, lyric_song_paths: dict[str, Path]) -> list[dict]:

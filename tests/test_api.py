@@ -349,6 +349,73 @@ def test_mix_with_song_uses_lyric_segment_clip_cues(monkeypatch, tmp_path):
     assert "adelay=2500:all=1" in filter_graph
 
 
+def test_mix_with_song_keeps_song_start_offset_when_bgm_loops(monkeypatch, tmp_path):
+    narration_path = tmp_path / "narration.wav"
+    song_path = tmp_path / "song.mp3"
+    output_path = tmp_path / "mixed.mp3"
+    captured = {"commands": []}
+
+    def fake_run(command, **kwargs):
+        captured["commands"].append(command)
+        if command[0] != "ffprobe":
+            Path(command[-1]).write_bytes(b"fake bgm wav")
+        return type("Result", (), {"returncode": 0, "stderr": "", "stdout": "10.0\n"})()
+
+    monkeypatch.setattr(renderer, "get_wav_duration", lambda _path: 30.0)
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+
+    renderer.mix_with_song(
+        "ffmpeg",
+        narration_path,
+        song_path,
+        output_path,
+        {"bgmVolume": 0.22, "songStartSec": 3.0, "segments": []},
+    )
+
+    commands = captured["commands"]
+    mix_command = commands[-1]
+    assert "-stream_loop" not in mix_command, "input-level stream_loop restarts at 0s and drops the song start offset"
+
+    bgm_command = commands[1]
+    assert bgm_command[0].endswith("ffmpeg")
+    assert "-ss" in bgm_command and "3.000" in bgm_command, "the song start offset must be applied when cutting the BGM source"
+    bgm_filter = bgm_command[bgm_command.index("-filter_complex") + 1]
+    # 10s song - 3s offset = 7s left, so 30s of BGM needs ceil(30/7) = 5 loops.
+    assert "aloop=loop=5:size=154350" in bgm_filter
+
+    mix_filter = mix_command[mix_command.index("-filter_complex") + 1]
+    assert "amix=inputs=2" in mix_filter
+
+
+def test_mix_with_song_skips_bgm_loop_when_song_covers_the_narration(monkeypatch, tmp_path):
+    narration_path = tmp_path / "narration.wav"
+    song_path = tmp_path / "song.mp3"
+    output_path = tmp_path / "mixed.mp3"
+    captured = {"commands": []}
+
+    def fake_run(command, **kwargs):
+        captured["commands"].append(command)
+        return type("Result", (), {"returncode": 0, "stderr": "", "stdout": "600.0\n"})()
+
+    monkeypatch.setattr(renderer, "get_wav_duration", lambda _path: 30.0)
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+
+    renderer.mix_with_song(
+        "ffmpeg",
+        narration_path,
+        song_path,
+        output_path,
+        {"bgmVolume": 0.22, "songStartSec": 3.0, "segments": []},
+    )
+
+    commands = captured["commands"]
+    # Only the ffprobe duration check and the final mix: a 600s song covers 30s of narration.
+    assert len(commands) == 2
+    assert commands[0][0].endswith("ffprobe")
+    assert "-ss" in commands[1]
+    assert "-stream_loop" not in commands[1]
+
+
 def fake_analysis(text: str) -> dict:
     if "小星星" in text:
         segments = [
