@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from ..repositories import project_repository
+from .chapter_service import split_text_into_chapters
 
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -188,6 +189,8 @@ def save_analysis(
 ) -> dict:
     project = get_project(project_id)
     analysis = normalize_analysis_segments(analysis)
+    if scope == "chapter" and chapter_id:
+        analysis = merge_chapter_analysis(project, analysis, chapter_id)
     now = datetime.now(timezone.utc).isoformat()
     analysis_id = uuid.uuid4().hex[:12]
     analysis_dir = project.root / "analysis"
@@ -221,6 +224,43 @@ def normalize_analysis_segments(analysis: dict) -> dict:
     if isinstance(normalized.get("timeline"), dict):
         normalized["timeline"]["segments"] = normalize_segments(normalized["timeline"].get("segments") or segments)
     return normalized
+
+
+def merge_chapter_analysis(project: Project, analysis: dict, chapter_id: str) -> dict:
+    """Splice a single-chapter analysis into the project timeline instead of replacing it.
+
+    Re-analyzing one chapter must keep every other chapter's segments and the manual cue
+    edits stored on them, and it has to keep the whole-project chapter list for the UI.
+    """
+    chapters = split_text_into_chapters(project.text)
+    project_chapters = [chapter.public_dict() for chapter in chapters]
+    chapter_order = {chapter.id: index for index, chapter in enumerate(chapters)}
+
+    existing_segments: list[dict] = []
+    if project.timeline_path.exists():
+        existing_segments = read_json(project.timeline_path).get("segments") or []
+
+    incoming_segments = analysis.get("segments") or []
+    merged_segments: list[dict] = []
+    for chapter in chapters:
+        if chapter.id == chapter_id:
+            merged_segments.extend(incoming_segments)
+            continue
+        merged_segments.extend(
+            segment for segment in existing_segments if segment.get("chapterId") == chapter.id
+        )
+    # Keep segments whose chapter disappeared from the text instead of silently dropping them.
+    merged_segments.extend(
+        segment for segment in existing_segments if chapter_order.get(segment.get("chapterId"), -1) == -1
+    )
+
+    merged_segments = normalize_segments(merged_segments)
+    merged = copy.deepcopy(analysis)
+    merged["segments"] = merged_segments
+    merged["chapters"] = project_chapters
+    if isinstance(merged.get("timeline"), dict):
+        merged["timeline"]["segments"] = normalize_segments(merged_segments)
+    return merged
 
 
 def list_analyses(project_id: str) -> list[dict]:

@@ -154,6 +154,79 @@ def test_chapter_analysis_is_persisted_with_scope(monkeypatch):
     assert history.json()["analyses"][0]["chapterTitle"] == "第二章 唱歌"
 
 
+def test_chapter_analysis_merges_into_the_project_timeline(monkeypatch):
+    monkeypatch.setattr(projects, "analyze_text", fake_chapter_scope_analysis)
+    project_id = client.post(
+        "/api/projects",
+        json={"text": "第一章 登台\n内容一。\n\n第二章 唱歌\n内容二。\n\n第三章 收尾\n内容三。"},
+    ).json()["id"]
+
+    full = client.post(f"/api/projects/{project_id}/analyze").json()
+    assert [segment["chapterId"] for segment in full["timeline"]["segments"]] == ["chap-001", "chap-002", "chap-003"]
+
+    # The user hand-tunes a cue and a duration on chapter 1 before re-analyzing chapter 2.
+    timeline = full["timeline"]
+    timeline["segments"][0]["durationSec"] = 9.5
+    timeline["segments"][0]["songClipStartSec"] = 7.5
+    timeline["segments"][0]["songClipEndSec"] = 11.0
+    client.patch(f"/api/projects/{project_id}/timeline", json=timeline)
+
+    response = client.post(f"/api/projects/{project_id}/chapters/chap-002/analyze")
+
+    assert response.status_code == 200
+    chapter_ids = [segment["chapterId"] for segment in response.json()["timeline"]["segments"]]
+    assert chapter_ids == ["chap-001", "chap-002", "chap-003"]
+
+    detail = client.get(f"/api/projects/{project_id}").json()
+    assert [segment["chapterId"] for segment in detail["timeline"]["segments"]] == ["chap-001", "chap-002", "chap-003"]
+    assert [chapter["id"] for chapter in detail["analysis"]["chapters"]] == ["chap-001", "chap-002", "chap-003"]
+
+    chapter_one = detail["timeline"]["segments"][0]
+    assert chapter_one["durationSec"] == 9.5
+    assert chapter_one["songClipStartSec"] == 7.5
+    assert chapter_one["songClipEndSec"] == 11.0
+
+    # startSec is recomputed across the merged timeline, not restarted per chapter.
+    starts = [segment["startSec"] for segment in detail["timeline"]["segments"]]
+    assert starts == sorted(starts)
+    assert starts[1] == 9.5
+
+    chapter_two = detail["timeline"]["segments"][1]
+    assert chapter_two["text"] == "内容二。"
+    assert chapter_two["chapterTitle"] == "第二章 唱歌"
+
+
+def fake_chapter_scope_analysis(text: str, chapters=None):
+    target_chapters = chapters or split_text_into_chapters(text)
+    segments = [
+        {
+            "id": f"seg-tmp-{index}",
+            "index": index,
+            "type": "narration",
+            "text": chapter.text,
+            "startSec": 0.0,
+            "durationSec": 3.0,
+            "confidence": 0.9,
+            "reason": "测试替身按章节分析",
+            "chapterId": chapter.id,
+            "chapterTitle": chapter.title,
+        }
+        for index, chapter in enumerate(target_chapters)
+    ]
+    return {
+        "analysisEngine": "test-double",
+        "chapters": [chapter.public_dict() for chapter in target_chapters],
+        "segments": segments,
+        "songCandidates": [],
+        "timeline": {
+            "bgmVolume": 0.22,
+            "narrationVolume": 1.0,
+            "songStartSec": 0.0,
+            "segments": segments,
+        },
+    }
+
+
 def test_song_and_timeline_updates_are_reflected_in_project_list(monkeypatch):
     monkeypatch.setattr(projects, "analyze_text", fake_analysis)
     project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]

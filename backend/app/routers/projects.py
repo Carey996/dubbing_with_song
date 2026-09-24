@@ -80,6 +80,7 @@ def analyze_project_chapter_endpoint(project_id: str, chapter_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Chapter not found.")
 
     analysis = analyze_text(chapter.text, chapters=[chapter])
+    analysis["chapters"] = [item.public_dict() for item in chapters]
     if project.chapter_lrc_path(chapter.id).exists():
         lrc_lines = parse_lrc(project.chapter_lrc_path(chapter.id).read_text(encoding="utf-8"))
         analysis = enrich_analysis_with_lrc(analysis, lrc_lines)
