@@ -36,6 +36,7 @@ import {
   buildSegmentSongAudioUrl,
   buildSelectedChapterSongAudioUrl,
 } from './songAudioUrl.js';
+import { runRenderFlow } from './renderFlow.js';
 import {
   buildWorkflowPath,
   getWorkflowPages,
@@ -75,6 +76,7 @@ function App() {
   const [timeline, setTimeline] = useState(emptyTimeline);
   const [renderResult, setRenderResult] = useState(null);
   const [busy, setBusy] = useState('');
+  const [isTimelineSaving, setIsTimelineSaving] = useState(false);
   const [error, setError] = useState('');
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisProgressVisible, setAnalysisProgressVisible] = useState(false);
@@ -520,7 +522,8 @@ function App() {
   }
 
   async function saveTimeline() {
-    if (!project) return;
+    if (!project) return false;
+    setIsTimelineSaving(true);
     setBusy('timeline');
     setError('');
     try {
@@ -531,9 +534,12 @@ function App() {
       });
       setTimeline(data);
       await loadProjectList();
+      return true;
     } catch (err) {
       setError(err.message);
+      return false;
     } finally {
+      setIsTimelineSaving(false);
       setBusy('');
     }
   }
@@ -543,9 +549,14 @@ function App() {
     setBusy('rendering');
     setError('');
     try {
-      await saveTimeline();
-      const data = await request(`/api/projects/${project.id}/render`, { method: 'POST' });
-      setRenderResult(data);
+      // POST /render reads timeline.json from disk, so an unsaved timeline must never render.
+      const outcome = await runRenderFlow({
+        persist: saveTimeline,
+        render: () => request(`/api/projects/${project.id}/render`, { method: 'POST' }),
+      });
+      if (outcome.status === 'invalid-timeline') return;
+
+      setRenderResult(outcome.result);
       await refreshProject(project.id);
     } catch (err) {
       setError(err.message);
@@ -553,6 +564,8 @@ function App() {
       setBusy('');
     }
   }
+
+  const renderBusy = Boolean(busy) || isTimelineSaving;
 
   function updateSegment(id, patch) {
     setTimeline((current) => ({
@@ -775,6 +788,7 @@ function App() {
             projectId: project?.id || route.projectId,
             chapterId: selectedChapter?.id || route.chapterId,
           })}
+          renderBusy={renderBusy}
           onAnalyzeChapter={() => analyzeProject(selectedChapter)}
           onPreviewNarration={previewNarration}
           onRenderAudio={renderAudio}
@@ -1025,6 +1039,7 @@ function AnalysisPage({
   analysis,
   busy,
   project,
+  renderBusy,
   renderResult,
   selectedChapter,
   selectedSegmentId,
@@ -1069,10 +1084,10 @@ function AnalysisPage({
               <Play size={18} />
               试听旁白
             </button>
-            <button type="button" onClick={onSaveTimeline} disabled={busy || !project || !segments.length}>
+            <button type="button" onClick={onSaveTimeline} disabled={renderBusy || !project || !segments.length}>
               保存时间轴
             </button>
-            <button onClick={onRenderAudio} disabled={busy || !project || !segments.length} className="primary">
+            <button onClick={onRenderAudio} disabled={renderBusy || !project || !segments.length} className="primary">
               <Download size={18} />
               生成音频
             </button>
@@ -1172,7 +1187,7 @@ function AnalysisPage({
                 onChange={(event) => onSetTimeline({ ...timeline, songStartSec: Number(event.target.value) })}
               />
             </label>
-            <button onClick={onSaveTimeline} disabled={busy || !project || !segments.length}>
+            <button onClick={onSaveTimeline} disabled={renderBusy || !project || !segments.length}>
               保存时间轴
             </button>
           </div>
