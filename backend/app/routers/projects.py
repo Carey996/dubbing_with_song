@@ -20,6 +20,7 @@ from ..services.project_store import (
     list_analyses,
     list_projects,
     list_renders,
+    read_chapter_asset,
     save_chapter_lrc_file,
     save_chapter_song_file,
     save_analysis,
@@ -227,16 +228,6 @@ def require_chapter(project, chapter_id: str):
 
 def chapter_with_assets(project, chapter) -> dict:
     payload = chapter.public_dict(include_text=True)
-    song_path = project.chapter_song_path(chapter.id)
-    lrc_path = project.chapter_lrc_path(chapter.id)
-    payload["chapterSong"] = {
-        "chapterId": chapter.id,
-        "filename": "song.mp3",
-        "url": f"/api/projects/{project.id}/chapters/{chapter.id}/song-file",
-    } if song_path.exists() else None
-    payload["chapterLyric"] = {
-        "chapterId": chapter.id,
-        "filename": "lyrics.lrc",
-        "url": f"/api/projects/{project.id}/chapters/{chapter.id}/lyric-file",
-    } if lrc_path.exists() else None
+    payload["chapterSong"] = read_chapter_asset(project, "chapter_song_mp3", project.chapter_song_path(chapter.id))
+    payload["chapterLyric"] = read_chapter_asset(project, "chapter_lrc", project.chapter_lrc_path(chapter.id))
     return payload

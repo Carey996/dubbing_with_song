@@ -301,8 +301,23 @@ def save_chapter_song_file(project_id: str, chapter_id: str, filename: str, cont
     }
     write_json(project.chapter_root(chapter_id) / "song.json", song)
     now = datetime.now(timezone.utc).isoformat()
-    project_repository.mark_asset_uploaded(project_id, "chapter_song_mp3", path, now, song)
+    project_repository.mark_asset_uploaded(project_id, "chapter_song_mp3", path, now, {**song, "updatedAt": now})
     return song
+
+
+def read_chapter_asset(project: Project, asset_type: str, path: Path) -> dict | None:
+    """Return the asset's stored upload metadata plus the timestamp browsers cache against."""
+    if not path.exists():
+        return None
+
+    metadata = project_repository.get_asset_metadata(project.id, asset_type, path) or {}
+    return {
+        "chapterId": metadata.get("chapterId") or path.parent.name,
+        "filename": metadata.get("filename") or path.name,
+        "size": metadata.get("size") or path.stat().st_size,
+        "url": metadata.get("url"),
+        "updatedAt": metadata.get("updatedAt") or path.stat().st_mtime,
+    }
 
 
 def save_chapter_lrc_file(project_id: str, chapter_id: str, filename: str, content: bytes) -> dict:
@@ -321,7 +336,7 @@ def save_chapter_lrc_file(project_id: str, chapter_id: str, filename: str, conte
     }
     write_json(project.chapter_root(chapter_id) / "lyrics.json", lyric)
     now = datetime.now(timezone.utc).isoformat()
-    project_repository.mark_asset_uploaded(project_id, "chapter_lrc", path, now, lyric)
+    project_repository.mark_asset_uploaded(project_id, "chapter_lrc", path, now, {**lyric, "updatedAt": now})
     return lyric
 
 

@@ -32,6 +32,11 @@ import {
   shouldShowTtsControls,
 } from './segmentNavigator.js';
 import {
+  buildProjectSongAudioUrl,
+  buildSegmentSongAudioUrl,
+  buildSelectedChapterSongAudioUrl,
+} from './songAudioUrl.js';
+import {
   buildWorkflowPath,
   getWorkflowPages,
   getWorkflowRouteDataNeeds,
@@ -113,16 +118,11 @@ function App() {
   const localChapterSongUrl = useMemo(() => (
     chapterSongFile ? URL.createObjectURL(chapterSongFile) : ''
   ), [chapterSongFile]);
-  const uploadedSongUrl = useMemo(() => {
-    if (!project?.hasSong) return '';
-    const version = encodeURIComponent(project.updatedAt || project.id);
-    return `/api/projects/${project.id}/song-file?v=${version}`;
-  }, [project]);
-  const selectedChapterSongUrl = useMemo(() => {
-    if (!project || !selectedChapter?.chapterSong) return '';
-    const version = encodeURIComponent(project.updatedAt || project.id);
-    return `/api/projects/${project.id}/chapters/${selectedChapter.id}/song-file?v=${version}`;
-  }, [project, selectedChapter]);
+  const uploadedSongUrl = useMemo(() => buildProjectSongAudioUrl(project), [project]);
+  const selectedChapterSongUrl = useMemo(
+    () => buildSelectedChapterSongAudioUrl(project, selectedChapter),
+    [project, selectedChapter],
+  );
   const songAudioUrl = localSongUrl || uploadedSongUrl;
   const analysisPhase = useMemo(() => {
     if (analysisProgress >= 100) return '分析完成，正在刷新结果';
@@ -588,13 +588,14 @@ function App() {
   }
 
   function getSegmentSongAudioUrl(segment) {
-    const segmentChapter = chapters.find((chapter) => chapter.id === segment.chapterId);
-    if (segmentChapter?.id === selectedChapter?.id && localChapterSongUrl) return localChapterSongUrl;
-    if (project && segmentChapter?.chapterSong) {
-      const version = encodeURIComponent(project.updatedAt || project.id);
-      return `/api/projects/${project.id}/chapters/${segmentChapter.id}/song-file?v=${version}`;
-    }
-    return songAudioUrl;
+    return buildSegmentSongAudioUrl({
+      segment,
+      chapters,
+      project,
+      selectedChapterId: selectedChapter?.id || '',
+      localChapterSongUrl,
+      projectSongUrl: songAudioUrl,
+    });
   }
 
   function previewNarration() {

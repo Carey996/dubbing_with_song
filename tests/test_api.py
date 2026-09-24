@@ -753,6 +753,29 @@ def test_chapter_lrc_upload_enriches_chapter_analysis_with_default_cues(monkeypa
     assert segment["lyricMatch"]["source"] == "chapter-lrc"
 
 
+def test_chapter_asset_reapload_bumps_updated_at_for_cache_busting():
+    created = client.post("/api/projects", json={"text": "第一章 唱歌\n一闪一闪亮晶晶"})
+    project_id = created.json()["id"]
+    song_url = f"/api/projects/{project_id}/chapters/chap-001/song-file"
+
+    def chapter_one():
+        chapters = client.get(f"/api/projects/{project_id}/chapters").json()["chapters"]
+        return chapters[0]
+
+    first_song = client.post(song_url, files={"file": ("first.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00", "audio/mpeg")})
+    first_updated = chapter_one()["chapterSong"]["updatedAt"]
+
+    client.post(song_url, files={"file": ("second.mp3", b"ID3\x04\x00\x00\x00\x00\x00\x00", "audio/mpeg")})
+    reuploaded = chapter_one()
+
+    assert first_song.status_code == 200
+    # The frontend cache-busts chapter audio with this value, so it must change on every upload
+    # or the browser keeps playing (and cueing against) the previous MP3.
+    assert first_updated
+    assert reuploaded["chapterSong"]["updatedAt"]
+    assert reuploaded["chapterSong"]["updatedAt"] != first_updated
+
+
 def test_render_uses_chapter_song_when_project_song_is_missing(monkeypatch):
     created = client.post("/api/projects", json={"text": "第一章 唱歌\n一闪一闪亮晶晶"})
     project_id = created.json()["id"]
