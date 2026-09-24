@@ -67,7 +67,16 @@ def render_project(project: Project) -> dict:
 def build_narration_track(timeline: dict, chunks_dir: Path, output_path: Path, include_lyrics: bool) -> None:
     segments = timeline.get("segments") or []
     chunk_paths: list[Path] = []
-    sample_template: tuple[int, int, int] | None = None
+    fallback_params = build_default_sample_template()
+
+    # Lyric placeholders must share the narrator track's WAV format, otherwise
+    # concatenate_wavs rejects the render. AI speech providers return their own format
+    # (OpenAI-compatible models return 24 kHz PCM), so when a segment that is not sent
+    # to TTS comes first, the format is probed from the first synthesized segment before
+    # any placeholder silence is written.
+    sample_template = None
+    if needs_format_probe(segments, include_lyrics):
+        sample_template = detect_sample_template(segments, chunks_dir) or fallback_params
 
     for segment in segments:
         text = segment.get("text", "")
@@ -76,27 +85,65 @@ def build_narration_track(timeline: dict, chunks_dir: Path, output_path: Path, i
         chunk_path = chunks_dir / f"{segment.get('id', len(chunk_paths))}.wav"
 
         if kind == "lyric" and not include_lyrics:
-            if sample_template is None:
-                sample_template = (1, 2, 22050)
-            create_silence_wav(chunk_path, duration, sample_template)
+            create_silence_wav(chunk_path, duration, sample_template or fallback_params)
         else:
             try:
                 synthesize_wav(text, chunk_path, segment=segment)
             except HTTPException as exc:
-                raise HTTPException(
-                    status_code=exc.status_code,
-                    detail=build_segment_tts_failure_detail(segment, exc.detail),
-                ) from exc
-            with wave.open(str(chunk_path), "rb") as wav:
-                sample_template = (wav.getnchannels(), wav.getsampwidth(), wav.getframerate())
+                raise wrap_segment_tts_failure(segment, exc) from exc
+            chunk_params = read_wav_params(chunk_path)
+            if chunk_params:
+                sample_template = chunk_params
 
         chunk_paths.append(chunk_path)
 
     if not chunk_paths:
-        create_silence_wav(output_path, 1.0, (1, 2, 22050))
+        create_silence_wav(output_path, 1.0, fallback_params)
         return
 
     concatenate_wavs(chunk_paths, output_path)
+
+
+def needs_format_probe(segments: list[dict], include_lyrics: bool) -> bool:
+    if not segments:
+        return False
+    first = segments[0]
+    first_needs_tts = first.get("type") != "lyric" or include_lyrics
+    if first_needs_tts:
+        # The first chunk comes from TTS itself and establishes the format for the rest.
+        return False
+    return any(segment.get("type") != "lyric" or include_lyrics for segment in segments)
+
+
+def detect_sample_template(segments: list[dict], chunks_dir: Path) -> tuple[int, int, int] | None:
+    for index, segment in enumerate(segments):
+        if segment.get("type") == "lyric":
+            continue
+        probe_path = chunks_dir / f"format-probe-{index}.wav"
+        try:
+            synthesize_wav(segment.get("text", ""), probe_path, segment=segment)
+        except HTTPException as exc:
+            raise wrap_segment_tts_failure(segment, exc) from exc
+        return read_wav_params(probe_path)
+    return None
+
+
+def wrap_segment_tts_failure(segment: dict, exc: HTTPException) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status_code,
+        detail=build_segment_tts_failure_detail(segment, exc.detail),
+    )
+
+
+def read_wav_params(path: Path) -> tuple[int, int, int] | None:
+    if not path.exists():
+        return None
+    with wave.open(str(path), "rb") as wav:
+        return (wav.getnchannels(), wav.getsampwidth(), wav.getframerate())
+
+
+def build_default_sample_template() -> tuple[int, int, int]:
+    return (1, 2, 22050)
 
 
 def has_lyric_segments(timeline: dict) -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import wave
 from pathlib import Path
 
 import pytest
@@ -881,6 +882,38 @@ def test_build_narration_track_adds_segment_context_to_tts_failure(monkeypatch):
     assert "seg-002" in detail
     assert "第 2 段" in detail
     assert "江宇滚出娱乐圈" in detail
+
+
+def test_build_narration_track_accepts_tts_wav_format_different_from_lyric_placeholder(monkeypatch):
+    TEST_TMP_DIR.mkdir(exist_ok=True)
+    chunks_dir = TEST_TMP_DIR / "mixed-format-chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    output_path = TEST_TMP_DIR / "mixed-format-narration.wav"
+
+    def fake_synthesize(_text, path, segment=None):
+        # Real AI TTS providers return their own WAV format; OpenAI-compatible speech
+        # models return 24 kHz PCM, not the 22050 Hz used for lyric placeholders.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(24000)
+            wav.writeframes(b"\x00\x00" * 2400)
+
+    monkeypatch.setattr(renderer, "synthesize_wav", fake_synthesize)
+    timeline = {
+        "segments": [
+            {"id": "seg-001", "index": 0, "type": "lyric", "text": "一闪一闪亮晶晶", "durationSec": 4},
+            {"id": "seg-002", "index": 1, "type": "narration", "text": "她唱完了。", "durationSec": 2},
+        ]
+    }
+
+    renderer.build_narration_track(timeline, chunks_dir, output_path, include_lyrics=False)
+
+    with wave.open(str(output_path), "rb") as wav:
+        params = (wav.getnchannels(), wav.getsampwidth(), wav.getframerate())
+    assert params == (1, 2, 24000)
+    assert output_path.stat().st_size > 44
 
 
 def test_synthesize_wav_applies_segment_voice_and_delivery(monkeypatch):
