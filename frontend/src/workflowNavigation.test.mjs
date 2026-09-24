@@ -7,6 +7,7 @@ import {
   getWorkflowPages,
   normalizeWorkflowPage,
   parseWorkflowRoute,
+  resolveChaptersProjectSwitch,
   resolveSelectedChapterIdForRoute,
 } from './workflowNavigation.js';
 
@@ -94,19 +95,56 @@ assert.equal(resolveSelectedChapterIdForRoute({
   route: { page: 'analysis', projectId: 'p1', chapterId: '' },
   chapters: routeChapters,
   currentChapterId: 'chap-001',
+  currentScopeProjectId: 'p1',
 }), '');
 assert.equal(resolveSelectedChapterIdForRoute({
   route: { page: 'analysis', projectId: 'p1', chapterId: 'chap-002' },
   chapters: routeChapters,
   currentChapterId: '',
+  currentScopeProjectId: '',
 }), 'chap-002');
 assert.equal(resolveSelectedChapterIdForRoute({
   route: { page: 'chapters', projectId: 'p1', chapterId: '' },
   chapters: routeChapters,
   currentChapterId: '',
-}), 'chap-001');
+  currentScopeProjectId: 'p1',
+}), '', 'the chapters route carries no chapter, so the route must not invent one');
 assert.equal(resolveSelectedChapterIdForRoute({
   route: { page: 'chapters', projectId: 'p1', chapterId: 'missing' },
   chapters: routeChapters,
   currentChapterId: 'chap-002',
+  currentScopeProjectId: 'p1',
 }), 'chap-002');
+
+// Chapter ids are per-index (chap-001, chap-002, ...) and identical in every project, so a
+// chapter selected in one project must never be applied to another project.
+assert.equal(resolveSelectedChapterIdForRoute({
+  route: { page: 'chapters', projectId: 'p2', chapterId: '' },
+  chapters: routeChapters,
+  currentChapterId: 'chap-003',
+  currentScopeProjectId: 'p1',
+}), '');
+assert.equal(resolveSelectedChapterIdForRoute({
+  route: { page: 'analysis', projectId: 'p2', chapterId: '' },
+  chapters: routeChapters,
+  currentChapterId: 'chap-002',
+  currentScopeProjectId: 'p1',
+}), '', 'a whole-project analysis route stays whole-project even right after a project switch');
+
+// Chapter ids are per-index (chap-001, chap-002, ...) and identical in every project, so a
+// chapter selected in one project is dropped when the open project changes.
+assert.equal(resolveChaptersProjectSwitch({
+  nextProjectId: 'p2',
+  currentScopeProjectId: 'p1',
+  currentChapterId: 'chap-003',
+}), '');
+assert.equal(resolveChaptersProjectSwitch({
+  nextProjectId: 'p1',
+  currentScopeProjectId: 'p1',
+  currentChapterId: 'chap-003',
+}), 'chap-003');
+assert.equal(resolveChaptersProjectSwitch({
+  nextProjectId: 'p2',
+  currentScopeProjectId: '',
+  currentChapterId: '',
+}), '');

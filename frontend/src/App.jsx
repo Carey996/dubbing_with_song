@@ -37,11 +37,13 @@ import {
   buildSelectedChapterSongAudioUrl,
 } from './songAudioUrl.js';
 import { runRenderFlow } from './renderFlow.js';
+import { resolveTimelineReload, shouldWarnAboutUnsavedTimeline } from './timelineGuard.js';
 import {
   buildWorkflowPath,
   getWorkflowPages,
   getWorkflowRouteDataNeeds,
   parseWorkflowRoute,
+  resolveChaptersProjectSwitch,
   resolveSelectedChapterIdForRoute,
 } from './workflowNavigation.js';
 import './styles.css';
@@ -86,6 +88,8 @@ function App() {
   const segmentRefs = useRef({});
   const shouldScrollSelectedSegment = useRef(false);
   const routeRequestId = useRef(0);
+  const hasUnsavedTimeline = useRef(false);
+  const timelineScopeProjectId = useRef('');
 
   const page = route.page;
   const routeKey = `${route.page}:${route.projectId}:${route.chapterId}`;
@@ -185,6 +189,7 @@ function App() {
             route,
             chapters: nextChapters,
             currentChapterId: selectedChapterId,
+            currentScopeProjectId: timelineScopeProjectId.current,
           }));
         }
         if (dataNeeds.projectList) {
@@ -261,12 +266,25 @@ function App() {
     }
   ), [localChapterSongUrl]);
 
+  function updateTimeline(nextTimeline) {
+    hasUnsavedTimeline.current = true;
+    setTimeline(nextTimeline);
+  }
+
   function navigateTo(nextRoute, { replace = false } = {}) {
     const normalizedRoute = {
       page: nextRoute.page || 'input',
       projectId: nextRoute.projectId || '',
       chapterId: nextRoute.chapterId || '',
     };
+    if (!replace && shouldWarnAboutUnsavedTimeline({
+      hasUnsavedTimeline: hasUnsavedTimeline.current,
+      nextProjectId: normalizedRoute.projectId,
+      currentProjectId: project?.id || '',
+    })) {
+      if (!window.confirm('时间轴还有未保存的修改，离开将丢失这些修改。继续？')) return;
+      hasUnsavedTimeline.current = false;
+    }
     const nextPath = buildWorkflowPath(normalizedRoute);
     if (window.location.pathname !== nextPath) {
       window.history[replace ? 'replaceState' : 'pushState']({}, '', nextPath);
@@ -274,14 +292,24 @@ function App() {
     setRoute(parseWorkflowRoute(nextPath));
   }
 
-  function applyChapters(nextChapters) {
+  function applyChapters(nextChapters, nextProjectId = timelineScopeProjectId.current) {
     setChapters(nextChapters);
-    setSelectedChapterId((currentId) => (
-      nextChapters.some((chapter) => chapter.id === currentId) ? currentId : nextChapters[0]?.id || ''
-    ));
+    setSelectedChapterId((currentId) => {
+      const allowed = resolveChaptersProjectSwitch({
+        nextProjectId,
+        currentScopeProjectId: timelineScopeProjectId.current,
+        currentChapterId: currentId,
+      });
+      return nextChapters.some((chapter) => chapter.id === allowed) ? allowed : '';
+    });
+    if (nextProjectId) {
+      timelineScopeProjectId.current = nextProjectId;
+    }
   }
 
   function clearCurrentProjectState() {
+    hasUnsavedTimeline.current = false;
+    timelineScopeProjectId.current = '';
     setProject(null);
     setText('');
     setTxtFile(null);
@@ -310,6 +338,10 @@ function App() {
   }
 
   function applyProjectDetail(data, nextChapters = null) {
+    const projectChanged = Boolean(timelineScopeProjectId.current) && timelineScopeProjectId.current !== data.id;
+    if (projectChanged) {
+      hasUnsavedTimeline.current = false;
+    }
     setProject(data);
     setText(data.text || '');
     setTxtFile(null);
@@ -317,15 +349,20 @@ function App() {
     setChapterSongFile(null);
     setChapterLrcFile(null);
     setAnalysis(data.analysis || null);
-    setTimeline(data.timeline || emptyTimeline);
+    setTimeline((currentTimeline) => resolveTimelineReload({
+      hasUnsavedTimeline: hasUnsavedTimeline.current,
+      localTimeline: currentTimeline,
+      remoteTimeline: data.timeline || emptyTimeline,
+      projectChanged,
+    }));
     setRenderResult(data.latestRender || null);
     setSelectedSegmentIndex(0);
     if (nextChapters) {
-      applyChapters(nextChapters);
+      applyChapters(nextChapters, data.id);
     } else if (data.analysis?.chapters?.length) {
-      applyChapters(data.analysis.chapters);
+      applyChapters(data.analysis.chapters, data.id);
     } else {
-      applyChapters([]);
+      applyChapters([], data.id);
     }
   }
 
@@ -412,6 +449,7 @@ function App() {
       setProject(data);
       setAnalysis(null);
       setTimeline(emptyTimeline);
+      timelineScopeProjectId.current = data.id;
       await loadChapters(data.id);
       await loadProjectList();
       navigateTo({ page: 'chapters', projectId: data.id });
@@ -437,8 +475,12 @@ function App() {
         : `/api/projects/${project.id}/analyze`;
       const data = await request(url, { method: 'POST' });
       setAnalysis(data);
-      applyChapters(data.chapters || chapters);
-      setTimeline(data.timeline);
+      applyChapters(data.chapters || chapters, project.id);
+      setTimeline((currentTimeline) => resolveTimelineReload({
+        hasUnsavedTimeline: hasUnsavedTimeline.current,
+        localTimeline: currentTimeline,
+        remoteTimeline: data.timeline,
+      }));
       setSelectedSegmentIndex(0);
       setAnalysisProgress(completeAnalysisProgress());
       await refreshProject(project.id);
@@ -464,7 +506,7 @@ function App() {
   async function loadChapters(projectId = project?.id) {
     if (!projectId) return;
     const data = await request(`/api/projects/${projectId}/chapters`);
-    applyChapters(data.chapters || []);
+    applyChapters(data.chapters || [], projectId);
   }
 
   async function uploadSong() {
@@ -527,6 +569,7 @@ function App() {
     setBusy('timeline');
     setError('');
     try {
+      hasUnsavedTimeline.current = false;
       const data = await request(`/api/projects/${project.id}/timeline`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -568,6 +611,7 @@ function App() {
   const renderBusy = Boolean(busy) || isTimelineSaving;
 
   function updateSegment(id, patch) {
+    hasUnsavedTimeline.current = true;
     setTimeline((current) => ({
       ...current,
       segments: current.segments.map((segment) => (segment.id === id ? { ...segment, ...patch } : segment)),
@@ -796,7 +840,7 @@ function App() {
           onSelectSegment={selectSegment}
           onSetCueFromPlayback={setCueFromPlayback}
           onSetSongFile={setSongFile}
-          onSetTimeline={setTimeline}
+          onSetTimeline={updateTimeline}
           onUpdateSegment={updateSegment}
           onUploadSong={uploadSong}
           getSegmentSongAudioUrl={getSegmentSongAudioUrl}

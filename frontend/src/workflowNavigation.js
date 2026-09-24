@@ -89,13 +89,34 @@ export function getWorkflowRouteDataNeeds({ page = 'input', projectId = '' } = {
   };
 }
 
-export function resolveSelectedChapterIdForRoute({ route, chapters = [], currentChapterId = '' }) {
-  if (route?.page === 'analysis' && !route.chapterId) {
+export function resolveSelectedChapterIdForRoute({
+  route,
+  chapters = [],
+  currentChapterId = '',
+  currentScopeProjectId = '',
+}) {
+  if (route?.chapterId && chapters.some((chapter) => chapter.id === route.chapterId)) {
+    return route.chapterId;
+  }
+
+  const sameProject = !route?.projectId || route.projectId === currentScopeProjectId;
+  if (!sameProject) {
+    // Chapter ids are per-index (chap-001, chap-002, ...) and identical in every project, so a
+    // chapter selected in the previous project must not point at this project's chapter with the
+    // same index.
     return '';
   }
 
-  if (route?.chapterId && chapters.some((chapter) => chapter.id === route.chapterId)) {
-    return route.chapterId;
+  // The chapters route carries no chapter, so the route itself never picks one. Falling back to
+  // chapter 1 here is what made 全篇 (which clears the selection) snap back to chapter 1.
+  if (route?.page === 'chapters') {
+    return chapters.some((chapter) => chapter.id === currentChapterId) ? currentChapterId : '';
+  }
+
+  // The analysis page without a chapter means whole-project scope. Falling back to the first
+  // chapter here is what made 全篇 on the chapters page snap back to chapter 1.
+  if (route?.page === 'analysis' && !route.chapterId) {
+    return '';
   }
 
   if (currentChapterId && chapters.some((chapter) => chapter.id === currentChapterId)) {
@@ -103,4 +124,14 @@ export function resolveSelectedChapterIdForRoute({ route, chapters = [], current
   }
 
   return chapters[0]?.id || '';
+}
+
+export function resolveChaptersProjectSwitch({ nextProjectId = '', currentScopeProjectId = '', currentChapterId = '' }) {
+  if (nextProjectId === currentScopeProjectId) {
+    return currentChapterId;
+  }
+  // Chapter ids are per-index (chap-001, chap-002, ...) and identical in every project, so a
+  // chapter selected in the previous project would silently point at this project's chapter with
+  // the same index.
+  return '';
 }
