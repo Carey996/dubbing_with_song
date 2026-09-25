@@ -6,8 +6,8 @@
 
 先创建 `.env`：
 
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 ```
 
 默认 `.env.example` 指向 LM Studio：
@@ -64,13 +64,13 @@ FFMPEG_PATH=D:\path\to\ffmpeg.exe
 
 后端：
 
-```powershell
+```bash
 python -m uvicorn backend.app.main:app --reload --port 28080
 ```
 
 前端：
 
-```powershell
+```bash
 cd frontend
 npm install
 npm run dev
@@ -80,11 +80,11 @@ npm run dev
 
 本地 CLI：
 
-```powershell
-python -m backend.app.cli .\story.txt
-python -m backend.app.cli .\story.txt --song .\song.mp3 --render
-python -m backend.app.cli .\story.txt --chapters-only
-python -m backend.app.cli .\story.txt --chapter chap-002
+```bash
+python -m backend.app.cli ./story.txt
+python -m backend.app.cli ./story.txt --song ./song.mp3 --render
+python -m backend.app.cli ./story.txt --chapters-only
+python -m backend.app.cli ./story.txt --chapter chap-002
 ```
 
 CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节切分、分析、上传歌曲和渲染 service。默认会创建项目并执行章节切分与全篇文本分析；传 `--chapter chap-002` 时只分析指定章节，传 `--chapters-only` 时只输出章节切分结果，传 `--no-analyze` 时创建项目并输出章节但不调用 LLM。
