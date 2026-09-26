@@ -10,6 +10,9 @@ pytest-cache-files-*/
 node_modules/
 tools/ffmpeg/
 dist/
+# npm lockfiles are generated per machine; the committed one pinned an unreachable
+# internal registry. uv.lock stays committed.
+package-lock.json
 data/
 logs/
 *.pyc
