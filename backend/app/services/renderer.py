@@ -516,21 +516,28 @@ def mix_with_song(
 ) -> None:
     duration = get_wav_duration(narration_path)
     bgm_volume = float(timeline.get("bgmVolume", 0.22) or 0.22)
+    narration_filter, narration_label = build_narration_stage(usable_narration_volume(timeline))
     lyric_clips = build_lyric_clip_specs(timeline, song_path, lyric_song_paths or {})
     if lyric_clips:
         song_paths = unique_clip_song_paths(lyric_clips)
         song_input_indexes = {str(path): index + 1 for index, path in enumerate(song_paths)}
         for clip in lyric_clips:
             clip["songInputIndex"] = song_input_indexes[str(clip["songPath"])]
-        filter_graph = build_lyric_clip_filter_graph(lyric_clips, bgm_volume)
+        filter_graph = build_lyric_clip_filter_graph(
+            lyric_clips,
+            bgm_volume,
+            narration_filter=narration_filter,
+            narration_label=narration_label,
+        )
         song_input_options = []
         song_inputs = [str(path) for path in song_paths]
     else:
         song_start = float(timeline.get("songStartSec", 0.0) or 0.0)
         bgm_source, song_input_options = build_bgm_source(ffmpeg, song_path, song_start, duration, output_path.parent)
         filter_graph = (
+            f"{narration_filter}"
             f"[1:a]volume={bgm_volume},atrim=0:{duration:.3f},asetpts=PTS-STARTPTS[bgm];"
-            "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[out]"
+            f"{narration_label}[bgm]amix=inputs=2:duration=first:dropout_transition=2[out]"
         )
         song_inputs = [str(bgm_source if bgm_source is not None else song_path)]
 
@@ -673,8 +680,42 @@ def unique_clip_song_paths(clips: list[dict]) -> list[Path]:
     return paths
 
 
-def build_lyric_clip_filter_graph(clips: list[dict], bgm_volume: float) -> str:
+def usable_narration_volume(timeline: dict) -> float:
+    """Narration gain for the mix.
+
+    narrationVolume was persisted, clamped and returned by the API but never reached ffmpeg, so
+    every value except the 1.0 default was silently ignored. Values are already validated at the
+    HTTP boundary; this only guards values read back from an older timeline.json.
+    """
+    try:
+        volume = float(timeline.get("narrationVolume", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(volume) or volume < 0:
+        return 1.0
+    return volume
+
+
+def build_narration_stage(volume: float) -> tuple[str, str]:
+    """Return the narration filter stage and the label to mix.
+
+    The default gain keeps the original graph untouched so existing projects mix bit-for-bit the
+    same as before narrationVolume was wired up.
+    """
+    if abs(volume - 1.0) < 1e-9:
+        return "", "[0:a]"
+    return f"[0:a]volume={volume:g}[narration];", "[narration]"
+
+
+def build_lyric_clip_filter_graph(
+    clips: list[dict],
+    bgm_volume: float,
+    narration_filter: str = "",
+    narration_label: str = "[0:a]",
+) -> str:
     filters = []
+    if narration_filter:
+        filters.append(narration_filter.rstrip(";"))
     clip_inputs = []
     source_labels: dict[int, str] = {}
     clips_by_input: dict[int, list[int]] = {}
@@ -700,14 +741,12 @@ def build_lyric_clip_filter_graph(clips: list[dict], bgm_volume: float) -> str:
         )
         clip_inputs.append(output_label)
 
-    filters.append(f"[0:a]{''.join(clip_inputs)}amix=inputs={len(clip_inputs) + 1}:duration=first:dropout_transition=0[out]")
+    filters.append(
+        f"{narration_label}{''.join(clip_inputs)}amix=inputs={len(clip_inputs) + 1}:duration=first:dropout_transition=0[out]"
+    )
     return ";".join(filters)
 
 
 def get_wav_duration(path: Path) -> float:
     with wave.open(str(path), "rb") as wav:
         return wav.getnframes() / float(wav.getframerate())
-
-
-def estimate_spoken_duration(text: str) -> float:
-    return max(1.0, len("".join((text or "").split())) / 6.5)

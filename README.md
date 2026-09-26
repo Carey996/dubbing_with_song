@@ -78,6 +78,13 @@ npm run dev
 
 打开 Vite 输出的本地地址，默认会把 `/api` 代理到 `http://127.0.0.1:28080`。
 
+测试：
+
+```bash
+python -m pytest -q          # 后端；数据写在临时目录，不会碰本地 data/
+npm test                     # 仓库根目录，等价于 cd frontend && npm test
+```
+
 本地 CLI：
 
 ```bash
@@ -98,6 +105,8 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节
 - `data/projects/<project_id>/` 保存原始文本、上传 MP3、分析 JSON 和时间轴 JSON。
 - `data/outputs/<project_id>/` 保存生成的音频文件；每次渲染会进入独立的 render 目录。
 
+每次成功渲染后，只保留最近 `RENDER_KEEP_COUNT`（默认 3）次**成功**渲染的音频文件和渲染历史，更早的产物和失败尝试的残留会被清理；`latestRender` 指向的那次渲染永远不会被清理。
+
 后端启动时会初始化 SQLite，并扫描已有 `data/projects` 目录导入旧项目。刷新页面或重启服务后，可以从页面左侧历史项目列表重新打开项目，恢复文本、分析结果、时间轴、歌曲状态和最近一次生成结果。
 
 存储根目录默认是仓库下的 `data/`，可以用环境变量 `DUBBING_DATA_DIR` 覆盖（测试套件用它把 SQLite 和项目目录指向临时目录，所以跑 `pytest` 不会写进本地数据）：
@@ -106,13 +115,19 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节
 DUBBING_DATA_DIR=/tmp/dubbing-data python -m uvicorn backend.app.main:app --reload --port 28080
 ```
 
+渲染产物保留数量同样可以用环境变量覆盖：
+
+```bash
+RENDER_KEEP_COUNT=5 python -m uvicorn backend.app.main:app --reload --port 28080
+```
+
 ## 当前能力
 
 - 支持粘贴文本或上传 `.txt` 创建项目。
 - LangChain LLM 分析器会拆分旁白/疑似歌词段，并给出歌曲候选提示。
 - 独立章节切分 service 会先识别大段 txt 的章节，再按章节送入 LLM 分析。
 - 支持上传单首 MP3 作为全篇 BGM。
-- 支持在页面中调整段落类型、时长、BGM 音量和歌曲起点。
+- 支持在页面中调整段落类型、时长、BGM 音量、旁白音量（混音时生效）和歌曲起点。
 - 后端导出会优先通过 AI TTS 生成旁白 WAV。
 - 如果系统安装了 `ffmpeg`，且项目上传了 MP3，后端会导出混音 MP3。
 - 支持 `GET /api/projects/{id}/chapters` 预览章节，以及 `POST /api/projects/{id}/chapters/{chapter_id}/analyze` 按章节分析。

@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from backend.app.main import app
 from backend.app.routers import projects
-from backend.app.repositories import db
+from backend.app.repositories import db, project_repository
 from backend.app.services import analyzer
 from backend.app.services import project_store
 from backend.app.services import renderer
@@ -1475,4 +1475,186 @@ def test_full_reanalysis_preserves_edited_mix_settings(monkeypatch):
     assert reanalyzed["timeline"]["songStartSec"] == 12.5
     assert stored["bgmVolume"] == 0.9
     assert stored["songStartSec"] == 12.5
+
+# --- Mix gain, render retention and asset metadata ---------------------------------------
+
+
+def test_mix_with_song_applies_narration_volume(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return type("Result", (), {"returncode": 0, "stderr": "", "stdout": "600.0"})()
+
+    monkeypatch.setattr(renderer, "get_wav_duration", lambda _path: 30.0)
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+
+    renderer.mix_with_song(
+        "ffmpeg",
+        tmp_path / "narration.wav",
+        tmp_path / "song.mp3",
+        tmp_path / "mixed.mp3",
+        {"bgmVolume": 0.22, "narrationVolume": 0.5, "songStartSec": 3.0, "segments": []},
+    )
+
+    command = captured["command"]
+    filter_graph = command[command.index("-filter_complex") + 1]
+    # narrationVolume was persisted and returned by the API but never reached ffmpeg.
+    assert "[0:a]volume=0.5[narration]" in filter_graph
+    assert "[narration][bgm]amix=inputs=2" in filter_graph
+
+
+def test_mix_with_song_keeps_the_default_narration_graph(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return type("Result", (), {"returncode": 0, "stderr": "", "stdout": "600.0"})()
+
+    monkeypatch.setattr(renderer, "get_wav_duration", lambda _path: 30.0)
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+
+    renderer.mix_with_song(
+        "ffmpeg",
+        tmp_path / "narration.wav",
+        tmp_path / "song.mp3",
+        tmp_path / "mixed.mp3",
+        {"bgmVolume": 0.22, "songStartSec": 3.0, "segments": []},
+    )
+
+    filter_graph = captured["command"][captured["command"].index("-filter_complex") + 1]
+    # The untouched default keeps existing projects mixing exactly as before.
+    assert "[narration]" not in filter_graph
+    assert "[0:a][bgm]amix=inputs=2" in filter_graph
+
+
+def test_mix_with_song_applies_narration_volume_to_lyric_clip_mix(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return type("Result", (), {"returncode": 0, "stderr": "", "stdout": "600.0"})()
+
+    monkeypatch.setattr(renderer, "get_wav_duration", lambda _path: 8.0)
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+
+    renderer.mix_with_song(
+        "ffmpeg",
+        tmp_path / "narration.wav",
+        tmp_path / "song.mp3",
+        tmp_path / "mixed.mp3",
+        {
+            "bgmVolume": 0.42,
+            "narrationVolume": 1.25,
+            "segments": [
+                {"id": "seg-001", "type": "lyric", "startSec": 2.5, "durationSec": 3,
+                 "songClipStartSec": 10, "songClipEndSec": 13}
+            ],
+        },
+    )
+
+    filter_graph = captured["command"][captured["command"].index("-filter_complex") + 1]
+    assert "[0:a]volume=1.25[narration]" in filter_graph
+    assert "[narration][clip0]" in filter_graph
+
+
+def test_usable_narration_volume_falls_back_for_invalid_values():
+    assert renderer.usable_narration_volume({}) == 1.0
+    assert renderer.usable_narration_volume({"narrationVolume": 0.5}) == 0.5
+    assert renderer.usable_narration_volume({"narrationVolume": float("nan")}) == 1.0
+    assert renderer.usable_narration_volume({"narrationVolume": float("inf")}) == 1.0
+    assert renderer.usable_narration_volume({"narrationVolume": -2}) == 1.0
+    assert renderer.usable_narration_volume({"narrationVolume": "loud"}) == 1.0
+
+
+def render_narration_output(project):
+    chunks_dir = project.output_dir / "chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    (chunks_dir / "seg-001.wav").write_bytes(b"RIFFfakeWAVE")
+    output_path = project.output_dir / "narration.wav"
+    output_path.write_bytes(b"RIFFfakeWAVE")
+    return {
+        "status": "narration-only",
+        "message": "测试生成完成。",
+        "outputUrl": project.output_url(output_path),
+        "warnings": [],
+    }
+
+
+def test_old_render_outputs_are_pruned(monkeypatch):
+    monkeypatch.setenv("RENDER_KEEP_COUNT", "2")
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    client.post(f"/api/projects/{project_id}/analyze")
+    monkeypatch.setattr(projects, "render_project", render_narration_output)
+
+    for _ in range(4):
+        assert client.post(f"/api/projects/{project_id}/render").status_code == 200
+
+    renders = client.get(f"/api/projects/{project_id}/renders").json()["renders"]
+    render_dirs = sorted(path.name for path in (project_store.OUTPUTS_DIR / project_id).iterdir() if path.is_dir())
+    latest = client.get(f"/api/projects/{project_id}").json()["latestRender"]
+
+    assert len(renders) == 2
+    assert render_dirs == sorted(render["id"] for render in renders)
+    assert latest["id"] == renders[0]["id"]
+    assert (project_store.OUTPUTS_DIR / project_id / latest["id"] / "narration.wav").exists()
+
+    # The asset index must not keep pointing at deleted files either.
+    with db.connect() as conn:
+        asset_count = conn.execute(
+            "select count(*) from project_assets where project_id = ? and asset_type = 'render_output'",
+            (project_id,),
+        ).fetchone()[0]
+    assert asset_count == 2
+
+
+def test_prune_keeps_the_newest_successful_render_when_a_newer_attempt_fails(monkeypatch):
+    monkeypatch.setenv("RENDER_KEEP_COUNT", "1")
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    client.post(f"/api/projects/{project_id}/analyze")
+
+    monkeypatch.setattr(projects, "render_project", render_narration_output)
+    succeeded = client.post(f"/api/projects/{project_id}/render").json()
+
+    def broken_render(_project):
+        raise RuntimeError("render exploded")
+
+    monkeypatch.setattr(projects, "render_project", broken_render)
+    with pytest.raises(RuntimeError):
+        client.post(f"/api/projects/{project_id}/render")
+
+    renders = client.get(f"/api/projects/{project_id}/renders").json()["renders"]
+    latest = client.get(f"/api/projects/{project_id}").json()["latestRender"]
+
+    # Counted per succeeded render: the failed attempt is cleaned up, not the good output.
+    assert [render["status"] for render in renders] == ["succeeded"]
+    assert latest["id"] == succeeded["id"]
+    assert (project_store.OUTPUTS_DIR / project_id / succeeded["id"] / "narration.wav").exists()
+
+
+def test_startup_reimport_keeps_existing_asset_metadata():
+    project_id = "metaabc12345"
+    root = project_store.PROJECTS_DIR / project_id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "source.txt").write_text("旧项目正文。", encoding="utf-8")
+    (root / "song.mp3").write_bytes(b"ID3song")
+    project_store.write_json(root / "metadata.json", {"id": project_id, "createdAt": "2026-04-29T00:00:00+00:00"})
+
+    project_store.import_existing_projects()
+    project_repository.mark_song_uploaded(
+        project_id,
+        root / "song.mp3",
+        "2026-04-29T01:00:00+00:00",
+        {"filename": "song.mp3", "size": 7, "url": "/api/projects/x/song-file"},
+    )
+    uploaded = project_repository.get_asset_metadata(project_id, "song_mp3", root / "song.mp3")
+    assert uploaded["filename"] == "song.mp3"
+
+    # Every startup re-registers existing assets without metadata; that must not wipe it.
+    project_store.import_existing_projects()
+
+    assert project_repository.get_asset_metadata(project_id, "song_mp3", root / "song.mp3") == uploaded
+
 

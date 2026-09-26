@@ -14,6 +14,6 @@ Before making code, config, documentation, or test changes in this repository, p
 
 - Run the relevant verification before calling the work complete.
 - At the end of a change, ask the user whether to merge the task branch back to the trunk branch.
-- Merge only after the user confirms. For this repository, the current trunk branch is `master`; if the default branch changes, use the actual trunk branch.
+- Merge only after the user confirms. For this repository, the current trunk branch is `main`; if the default branch changes, use the actual trunk branch.
 - After a successful local merge, rerun relevant verification on the trunk checkout, remove the completed worktree with `git worktree remove`, and delete the merged task branch.
 - If the user does not want to merge yet, keep the branch and worktree intact and report their paths.

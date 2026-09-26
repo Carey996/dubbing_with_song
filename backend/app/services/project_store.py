@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -390,12 +391,67 @@ def create_render_record(project_id: str) -> str:
 def complete_render_record(project_id: str, render_id: str, result: dict) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     output_path = output_url_to_path(result.get("outputUrl") or "")
-    return project_repository.complete_render_record(project_id, render_id, result, output_path, now)
+    record = project_repository.complete_render_record(project_id, render_id, result, output_path, now)
+    prune_render_outputs(project_id)
+    return record
 
 
 def fail_render_record(project_id: str, render_id: str, error: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
     project_repository.fail_render_record(project_id, render_id, error, now)
+    # Drop the partial output of the failed attempt instead of leaving its chunks behind.
+    prune_render_outputs(project_id)
+
+
+DEFAULT_RENDER_KEEP_COUNT = 3
+
+
+def render_keep_count() -> int:
+    try:
+        configured = int(os.getenv("RENDER_KEEP_COUNT", ""))
+    except (TypeError, ValueError):
+        configured = DEFAULT_RENDER_KEEP_COUNT
+    return max(1, configured)
+
+
+def prune_render_outputs(project_id: str, keep: int | None = None) -> list[str]:
+    """Delete render directories and history rows beyond the newest keep succeeded renders.
+
+    Every render gets its own directory, so a repeatedly re-rendered project kept every WAV chunk
+    it ever produced. The newest keep *succeeded* renders are never touched, so latestRender keeps
+    pointing at a file that exists even when a newer attempt failed; failed leftovers go away.
+    """
+    keep_count = render_keep_count() if keep is None else max(1, keep)
+    if not is_storage_segment(project_id):
+        return []
+
+    removed = []
+    succeeded_seen = 0
+    for render in project_repository.list_renders(project_id):
+        status = render.get("status")
+        if status == "running":
+            # Another request may still be writing this directory.
+            continue
+        if status == "succeeded":
+            succeeded_seen += 1
+            if succeeded_seen <= keep_count:
+                continue
+
+        render_id = str(render.get("id") or "")
+        if not is_storage_segment(render_id):
+            continue
+        try:
+            remove_tree(OUTPUTS_DIR / project_id / render_id, OUTPUTS_DIR)
+        except (OSError, HTTPException):
+            # A stuck directory must not fail an otherwise successful render.
+            continue
+        project_repository.delete_render_record(project_id, render_id, render.get("outputPath"))
+        removed.append(render_id)
+    return removed
+
+
+def is_storage_segment(value: str) -> bool:
+    return bool(value) and value.replace("-", "").isalnum()
 
 
 def list_renders(project_id: str) -> list[dict]:

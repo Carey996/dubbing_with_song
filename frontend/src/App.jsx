@@ -1258,6 +1258,18 @@ function AnalysisPage({
               <strong>{Math.round(timeline.bgmVolume * 100)}%</strong>
             </label>
             <label>
+              旁白音量
+              <input
+                type="range"
+                min="0"
+                max="1.5"
+                step="0.01"
+                value={timeline.narrationVolume ?? 1}
+                onChange={(event) => onSetTimeline({ ...timeline, narrationVolume: Number(event.target.value) })}
+              />
+              <strong>{Math.round((timeline.narrationVolume ?? 1) * 100)}%</strong>
+            </label>
+            <label>
               歌曲起点秒
               <input
                 type="number"
