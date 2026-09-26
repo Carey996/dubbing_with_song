@@ -13,6 +13,12 @@ export function resolveTimelineReload({
   return localTimeline;
 }
 
+export function isTimelineSaveStale({ revisionAtSave = 0, currentRevision = 0 }) {
+  // A PATCH echoes back the payload it received. If the user edited the timeline while that
+  // request was in flight, the echo is already behind the local state and must not replace it.
+  return revisionAtSave !== currentRevision;
+}
+
 export function shouldWarnAboutUnsavedTimeline({ hasUnsavedTimeline = false, nextProjectId = '', currentProjectId = '' }) {
   if (!hasUnsavedTimeline) return false;
   // Opening a different project never loses work from the project being left behind.

@@ -7,6 +7,7 @@ import {
   getWorkflowPages,
   normalizeWorkflowPage,
   parseWorkflowRoute,
+  resolveChapterSelectionAfterChaptersLoad,
   resolveChaptersProjectSwitch,
   resolveSelectedChapterIdForRoute,
 } from './workflowNavigation.js';
@@ -148,3 +149,31 @@ assert.equal(resolveChaptersProjectSwitch({
   currentScopeProjectId: '',
   currentChapterId: '',
 }), '');
+
+// App.jsx applyChapters() captures the scope it is leaving and passes it here as
+// previousProjectId. Reading that scope ref after moving it made every project switch look like
+// a reload of the same project, so chap-002 stayed selected in the newly opened project.
+assert.equal(resolveChapterSelectionAfterChaptersLoad({
+  previousProjectId: 'p1',
+  nextProjectId: 'p2',
+  currentChapterId: 'chap-002',
+  chapters: routeChapters,
+}), '', 'a project switch must drop the previous project chapter');
+assert.equal(resolveChapterSelectionAfterChaptersLoad({
+  previousProjectId: 'p2',
+  nextProjectId: 'p2',
+  currentChapterId: 'chap-002',
+  chapters: routeChapters,
+}), 'chap-002', 'reloading the same project keeps the chapter in scope');
+assert.equal(resolveChapterSelectionAfterChaptersLoad({
+  previousProjectId: '',
+  nextProjectId: 'p2',
+  currentChapterId: 'chap-001',
+  chapters: routeChapters,
+}), '', 'a freshly created project never inherits a chapter selection');
+assert.equal(resolveChapterSelectionAfterChaptersLoad({
+  previousProjectId: 'p2',
+  nextProjectId: 'p2',
+  currentChapterId: 'chap-999',
+  chapters: routeChapters,
+}), '', 'a chapter id that no longer exists is dropped');

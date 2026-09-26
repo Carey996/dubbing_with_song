@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import copy
 import json
+import math
 import shutil
 import uuid
-import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,12 +12,12 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from ..config import resolve_data_dir
 from ..repositories import project_repository
 from .chapter_service import split_text_into_chapters
 
 
-BASE_DIR = Path(__file__).resolve().parents[3]
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = resolve_data_dir()
 PROJECTS_DIR = DATA_DIR / "projects"
 OUTPUTS_DIR = DATA_DIR / "outputs"
 
@@ -191,6 +192,11 @@ def save_analysis(
     analysis = normalize_analysis_segments(analysis)
     if scope == "chapter" and chapter_id:
         analysis = merge_chapter_analysis(project, analysis, chapter_id)
+    # Analysis owns the segmentation; the mix settings belong to the editor. Overwriting them
+    # here made the renderer (which reads timeline.json from disk) silently use defaults while
+    # the page still showed the values the user had dialled in.
+    if isinstance(analysis.get("timeline"), dict):
+        analysis["timeline"] = merge_timeline_settings(read_stored_timeline(project), analysis["timeline"])
     now = datetime.now(timezone.utc).isoformat()
     analysis_id = uuid.uuid4().hex[:12]
     analysis_dir = project.root / "analysis"
@@ -215,6 +221,27 @@ def save_analysis(
         created_at=now,
     )
     return {"id": analysis_id, **analysis}
+
+
+TIMELINE_SETTING_KEYS = ("bgmVolume", "narrationVolume", "songStartSec")
+
+
+def merge_timeline_settings(existing: dict | None, incoming: dict) -> dict:
+    """Carry the editor's mix settings over a freshly analysed timeline."""
+    merged = copy.deepcopy(incoming)
+    for key in TIMELINE_SETTING_KEYS:
+        if isinstance(existing, dict) and key in existing:
+            merged[key] = existing[key]
+    return merged
+
+
+def read_stored_timeline(project: Project) -> dict | None:
+    if not project.timeline_path.exists():
+        return None
+    try:
+        return read_json(project.timeline_path)
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def normalize_analysis_segments(analysis: dict) -> dict:
@@ -345,7 +372,7 @@ def save_timeline(project_id: str, payload: dict) -> dict:
     timeline = {
         "bgmVolume": clamp_float(payload.get("bgmVolume", 0.22), 0.0, 1.0),
         "narrationVolume": clamp_float(payload.get("narrationVolume", 1.0), 0.0, 1.5),
-        "songStartSec": max(0.0, float(payload.get("songStartSec", 0.0) or 0.0)),
+        "songStartSec": max(0.0, to_finite_float(payload.get("songStartSec"), 0.0)),
         "segments": normalize_segments(payload.get("segments") or []),
     }
     write_json(project.timeline_path, timeline)
@@ -401,7 +428,7 @@ def normalize_segments(segments: list[dict]) -> list[dict]:
     normalized = []
     cursor = 0.0
     for index, segment in enumerate(segments):
-        duration = max(0.5, float(segment.get("durationSec", 2.0) or 2.0))
+        duration = max(0.5, to_finite_float(segment.get("durationSec"), 2.0))
         kind = segment.get("type") if segment.get("type") in {"narration", "lyric"} else "narration"
         normalized.append(
             {
@@ -411,15 +438,15 @@ def normalize_segments(segments: list[dict]) -> list[dict]:
                 "text": str(segment.get("text") or ""),
                 "startSec": round(cursor, 2),
                 "durationSec": round(duration, 2),
-                "confidence": float(segment.get("confidence", 0.5) or 0.5),
+                "confidence": to_finite_float(segment.get("confidence"), 0.5),
                 "reason": str(segment.get("reason") or ""),
                 "speakerName": normalize_segment_text(segment.get("speakerName"), "旁白"),
                 "speakerGender": normalize_speaker_gender(segment.get("speakerGender")),
                 "emotion": normalize_segment_text(segment.get("emotion"), "neutral"),
                 "voiceStyle": normalize_segment_text(segment.get("voiceStyle"), "neutral_narrator"),
                 "delivery": normalize_segment_text(segment.get("delivery"), "自然清晰，保持中文有声书旁白节奏。"),
-                "songClipStartSec": max(0.0, float(segment.get("songClipStartSec", 0.0) or 0.0)),
-                "songClipEndSec": max(0.0, float(segment.get("songClipEndSec", duration) or duration)),
+                "songClipStartSec": max(0.0, to_finite_float(segment.get("songClipStartSec"), 0.0)),
+                "songClipEndSec": max(0.0, to_finite_float(segment.get("songClipEndSec"), duration)),
                 **({"chapterId": str(segment.get("chapterId"))} if segment.get("chapterId") else {}),
                 **({"chapterTitle": str(segment.get("chapterTitle"))} if segment.get("chapterTitle") else {}),
                 **({"lyricMatch": segment.get("lyricMatch")} if isinstance(segment.get("lyricMatch"), dict) else {}),
@@ -440,7 +467,21 @@ def normalize_speaker_gender(value) -> str:
 
 
 def clamp_float(value: Any, min_value: float, max_value: float) -> float:
-    return min(max(float(value), min_value), max_value)
+    return min(max(to_finite_float(value, min_value), min_value), max_value)
+
+
+def to_finite_float(value: Any, fallback: float) -> float:
+    """Coerce to a real, finite float.
+
+    The HTTP boundary rejects Infinity/NaN now, but timeline.json is also read back from disk
+    and can predate that validation. JSON allows the Infinity/NaN literals, ffmpeg does not,
+    so anything non-finite falls back to the field default instead of reaching a subprocess.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return numeric if math.isfinite(numeric) else fallback
 
 
 def read_json(path: Path) -> dict:

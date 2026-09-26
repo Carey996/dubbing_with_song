@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 
-import { resolveTimelineReload, shouldWarnAboutUnsavedTimeline } from './timelineGuard.js';
+import {
+  isTimelineSaveStale,
+  resolveTimelineReload,
+  shouldWarnAboutUnsavedTimeline,
+} from './timelineGuard.js';
 
 const localTimeline = { bgmVolume: 0.9, segments: [{ id: 'seg-001', durationSec: 9.5 }] };
 const remoteTimeline = { bgmVolume: 0.22, segments: [{ id: 'seg-001', durationSec: 3 }] };
@@ -29,3 +33,9 @@ assert.equal(shouldWarnAboutUnsavedTimeline({ hasUnsavedTimeline: true, nextProj
 assert.equal(shouldWarnAboutUnsavedTimeline({ hasUnsavedTimeline: false, nextProjectId: 'p1', currentProjectId: 'p1' }), false);
 // Entering a project from the history page has no current project yet.
 assert.equal(shouldWarnAboutUnsavedTimeline({ hasUnsavedTimeline: true, nextProjectId: 'p1', currentProjectId: '' }), true);
+
+// A PATCH echoes the payload it received. An edit made while that request was in flight makes
+// the echo stale: applying it would drop the edit and a render started from it would be wrong.
+assert.equal(isTimelineSaveStale({ revisionAtSave: 3, currentRevision: 3 }), false);
+assert.equal(isTimelineSaveStale({ revisionAtSave: 3, currentRevision: 4 }), true);
+assert.equal(isTimelineSaveStale({}), false, 'no edits means the response is never stale');

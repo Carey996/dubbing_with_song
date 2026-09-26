@@ -100,6 +100,12 @@ CLI 会读取 txt，然后复用 Web API 背后的同一套项目创建、章节
 
 后端启动时会初始化 SQLite，并扫描已有 `data/projects` 目录导入旧项目。刷新页面或重启服务后，可以从页面左侧历史项目列表重新打开项目，恢复文本、分析结果、时间轴、歌曲状态和最近一次生成结果。
 
+存储根目录默认是仓库下的 `data/`，可以用环境变量 `DUBBING_DATA_DIR` 覆盖（测试套件用它把 SQLite 和项目目录指向临时目录，所以跑 `pytest` 不会写进本地数据）：
+
+```bash
+DUBBING_DATA_DIR=/tmp/dubbing-data python -m uvicorn backend.app.main:app --reload --port 28080
+```
+
 ## 当前能力
 
 - 支持粘贴文本或上传 `.txt` 创建项目。

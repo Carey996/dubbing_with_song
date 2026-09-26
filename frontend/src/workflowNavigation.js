@@ -135,3 +135,20 @@ export function resolveChaptersProjectSwitch({ nextProjectId = '', currentScopeP
   // the same index.
   return '';
 }
+
+export function resolveChapterSelectionAfterChaptersLoad({
+  previousProjectId = '',
+  nextProjectId = '',
+  currentChapterId = '',
+  chapters = [],
+}) {
+  // previousProjectId has to be the scope we are leaving, captured before the caller moves its
+  // "current project" reference. Reading the reference after the move made every project switch
+  // look like a reload of the same project, which kept the previous project's chapter selected.
+  const allowed = resolveChaptersProjectSwitch({
+    nextProjectId,
+    currentScopeProjectId: previousProjectId,
+    currentChapterId,
+  });
+  return chapters.some((chapter) => chapter.id === allowed) ? allowed : '';
+}

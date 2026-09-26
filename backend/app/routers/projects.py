@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import FileResponse
 from starlette.datastructures import UploadFile
 
 from ..services.analyzer import analyze_text
 from ..services.chapter_service import split_text_into_chapters
-from ..services.lrc import enrich_analysis_with_lrc, parse_lrc
+from ..services.lrc import decode_lrc_content, enrich_analysis_with_lrc, parse_lrc
 from ..services.project_store import (
     complete_render_record,
     create_project,
@@ -35,6 +36,46 @@ router = APIRouter(tags=["projects"])
 
 class CreateProjectRequest(BaseModel):
     text: str
+
+
+class TimelineSegmentRequest(BaseModel):
+    """One timeline segment.
+
+    Unknown keys are kept (extra="allow") so the editor can round-trip fields the backend
+    does not interpret yet, while the numbers that reach ffmpeg and wave are constrained to
+    real, finite values. Without this, a body like {"durationSec": Infinity} was accepted and
+    written to timeline.json as a non-JSON literal that every strict parser rejects.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    index: int | None = None
+    type: str | None = None
+    text: str | None = None
+    startSec: float | None = Field(default=None, allow_inf_nan=False)
+    durationSec: float | None = Field(default=None, allow_inf_nan=False)
+    confidence: float | None = Field(default=None, allow_inf_nan=False)
+    reason: str | None = None
+    speakerName: str | None = None
+    speakerGender: str | None = None
+    emotion: str | None = None
+    voiceStyle: str | None = None
+    delivery: str | None = None
+    songClipStartSec: float | None = Field(default=None, allow_inf_nan=False)
+    songClipEndSec: float | None = Field(default=None, allow_inf_nan=False)
+    chapterId: str | None = None
+    chapterTitle: str | None = None
+    lyricMatch: dict[str, Any] | None = None
+
+
+class TimelineRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    bgmVolume: float = Field(default=0.22, allow_inf_nan=False)
+    narrationVolume: float = Field(default=1.0, allow_inf_nan=False)
+    songStartSec: float = Field(default=0.0, allow_inf_nan=False)
+    segments: list[TimelineSegmentRequest] = Field(default_factory=list)
 
 
 @router.get("/projects")
@@ -83,7 +124,7 @@ def analyze_project_chapter_endpoint(project_id: str, chapter_id: str) -> dict:
     analysis = analyze_text(chapter.text, chapters=[chapter])
     analysis["chapters"] = [item.public_dict() for item in chapters]
     if project.chapter_lrc_path(chapter.id).exists():
-        lrc_lines = parse_lrc(project.chapter_lrc_path(chapter.id).read_text(encoding="utf-8"))
+        lrc_lines = parse_lrc(decode_lrc_content(project.chapter_lrc_path(chapter.id).read_bytes()))
         analysis = enrich_analysis_with_lrc(analysis, lrc_lines)
     return save_analysis(project_id, analysis, scope="chapter", chapter_id=chapter.id, chapter_title=chapter.title)
 
@@ -169,7 +210,7 @@ async def upload_chapter_lyric_endpoint(project_id: str, chapter_id: str, reques
         raise HTTPException(status_code=400, detail="Only .lrc lyric files are supported.")
 
     content = await upload.read()
-    parse_lrc(content.decode("utf-8-sig"))
+    parse_lrc(decode_lrc_content(content))
     return save_chapter_lrc_file(project.id, chapter_id, filename, content)
 
 
@@ -185,11 +226,9 @@ def get_chapter_lyric_endpoint(project_id: str, chapter_id: str) -> FileResponse
 
 
 @router.patch("/projects/{project_id}/timeline")
-async def update_timeline_endpoint(project_id: str, request: Request) -> dict:
+def update_timeline_endpoint(project_id: str, payload: TimelineRequest) -> dict:
     get_project(project_id)
-    payload = await request.json()
-    timeline = save_timeline(project_id, payload)
-    return timeline
+    return save_timeline(project_id, payload.model_dump())
 
 
 @router.post("/projects/{project_id}/render")

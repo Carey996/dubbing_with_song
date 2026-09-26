@@ -5,9 +5,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from ..config import resolve_data_dir
 
-BASE_DIR = Path(__file__).resolve().parents[3]
-DATA_DIR = BASE_DIR / "data"
+
+DATA_DIR = resolve_data_dir()
 DB_PATH = DATA_DIR / "app.sqlite3"
 SQL_DIR = Path(__file__).resolve().parent / "sql"
 SCHEMA_VERSION = "1"
