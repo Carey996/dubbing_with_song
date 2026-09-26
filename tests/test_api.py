@@ -19,7 +19,9 @@ from backend.app.services.project_store import list_projects
 
 
 client = TestClient(app)
-TEST_TMP_DIR = Path("pytest-cache-files-ai-tts")
+# Scratch files for TTS/ffmpeg tests live under the isolated data dir from conftest.py so a
+# pytest run never writes into the checkout.
+TEST_TMP_DIR = project_store.DATA_DIR / "test-scratch"
 
 
 def test_project_store_keeps_sql_out_of_service_layer():
@@ -1373,3 +1375,104 @@ def test_synthesize_wav_requires_ai_tts_config(monkeypatch):
 
     assert exc.value.status_code == 503
     assert "TTS_API_KEY" in str(exc.value.detail)
+
+# --- Isolation, timeline validation and re-analysis regressions -------------------------
+
+
+def test_tests_run_against_an_isolated_data_dir():
+    """Guard the conftest isolation: a pytest run must never touch the checkout data dir."""
+    checkout_data_dir = Path(project_store.__file__).resolve().parents[3] / "data"
+
+    assert project_store.DATA_DIR != checkout_data_dir
+    assert project_store.PROJECTS_DIR.parent == project_store.DATA_DIR
+    assert db.DB_PATH.parent == project_store.DATA_DIR
+
+
+def test_timeline_patch_rejects_non_finite_and_malformed_payloads():
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    malformed_bodies = [
+        b"{not json",
+        b'{"bgmVolume": "abc"}',
+        b'{"segments": {"a": 1}}',
+        b'{"bgmVolume": Infinity}',
+        b'{"songStartSec": NaN}',
+        b'{"segments": [{"durationSec": Infinity}]}',
+    ]
+
+    for body in malformed_bodies:
+        response = client.patch(
+            f"/api/projects/{project_id}/timeline",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        # These used to be unhandled 500s, and the Infinity body silently wrote a non-JSON
+        # literal into timeline.json that no strict parser accepts.
+        assert response.status_code == 422, (body, response.status_code, response.text)
+
+    assert client.get(f"/api/projects/{project_id}").json()["hasTimeline"] is False
+
+
+def test_timeline_patch_accepts_a_valid_payload():
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+
+    response = client.patch(
+        f"/api/projects/{project_id}/timeline",
+        json={
+            "bgmVolume": 0.5,
+            "songStartSec": 3,
+            "segments": [{"id": "seg-001", "text": "旁白内容。", "durationSec": 4}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["bgmVolume"] == 0.5
+    assert response.json()["songStartSec"] == 3.0
+    assert response.json()["segments"][0]["durationSec"] == 4.0
+
+
+def test_save_timeline_falls_back_for_non_finite_values():
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+
+    timeline = project_store.save_timeline(
+        project_id,
+        {
+            "bgmVolume": float("inf"),
+            "songStartSec": float("nan"),
+            "segments": [{"id": "seg-001", "text": "旁白内容。", "durationSec": float("inf")}],
+        },
+    )
+
+    assert timeline["bgmVolume"] == 0.0
+    assert timeline["songStartSec"] == 0.0
+    assert timeline["segments"][0]["durationSec"] == 2.0
+
+
+def test_chapter_lrc_upload_rejects_non_utf8_content():
+    project_id = client.post("/api/projects", json={"text": "第一章\n内容一。"}).json()["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/chapters/chap-001/lyric-file",
+        files={"file": ("lyrics.lrc", b"[00:01.00] \xff\xfe\x00bad", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert "UTF-8" in response.json()["detail"]
+
+
+def test_full_reanalysis_preserves_edited_mix_settings(monkeypatch):
+    """A re-analysis rebuilds the segments but must not reset the editor mix settings."""
+    monkeypatch.setattr(projects, "analyze_text", fake_analysis)
+    project_id = client.post("/api/projects", json={"text": "旁白内容。"}).json()["id"]
+    timeline = client.post(f"/api/projects/{project_id}/analyze").json()["timeline"]
+    timeline["bgmVolume"] = 0.9
+    timeline["songStartSec"] = 12.5
+    assert client.patch(f"/api/projects/{project_id}/timeline", json=timeline).status_code == 200
+
+    reanalyzed = client.post(f"/api/projects/{project_id}/analyze").json()
+    stored = client.get(f"/api/projects/{project_id}").json()["timeline"]
+
+    assert reanalyzed["timeline"]["bgmVolume"] == 0.9
+    assert reanalyzed["timeline"]["songStartSec"] == 12.5
+    assert stored["bgmVolume"] == 0.9
+    assert stored["songStartSec"] == 12.5
+

@@ -36,14 +36,18 @@ import {
   buildSegmentSongAudioUrl,
   buildSelectedChapterSongAudioUrl,
 } from './songAudioUrl.js';
-import { runRenderFlow } from './renderFlow.js';
-import { resolveTimelineReload, shouldWarnAboutUnsavedTimeline } from './timelineGuard.js';
+import { isRenderBusy, runRenderFlow } from './renderFlow.js';
+import {
+  isTimelineSaveStale,
+  resolveTimelineReload,
+  shouldWarnAboutUnsavedTimeline,
+} from './timelineGuard.js';
 import {
   buildWorkflowPath,
   getWorkflowPages,
   getWorkflowRouteDataNeeds,
   parseWorkflowRoute,
-  resolveChaptersProjectSwitch,
+  resolveChapterSelectionAfterChaptersLoad,
   resolveSelectedChapterIdForRoute,
 } from './workflowNavigation.js';
 import './styles.css';
@@ -79,6 +83,7 @@ function App() {
   const [renderResult, setRenderResult] = useState(null);
   const [busy, setBusy] = useState('');
   const [isTimelineSaving, setIsTimelineSaving] = useState(false);
+  const [isRendering, setIsRendering] = useState(false);
   const [error, setError] = useState('');
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisProgressVisible, setAnalysisProgressVisible] = useState(false);
@@ -90,6 +95,7 @@ function App() {
   const routeRequestId = useRef(0);
   const hasUnsavedTimeline = useRef(false);
   const timelineScopeProjectId = useRef('');
+  const timelineRevision = useRef(0);
 
   const page = route.page;
   const routeKey = `${route.page}:${route.projectId}:${route.chapterId}`;
@@ -183,13 +189,15 @@ function App() {
           ? (await request(`/api/projects/${route.projectId}/chapters`)).chapters || []
           : null;
         if (cancelled || routeRequestId.current !== requestId) return;
+        // Capture the scope we are leaving: applyProjectDetail moves the ref to the new project.
+        const previousProjectId = timelineScopeProjectId.current;
         applyProjectDetail(detail, nextChapters);
         if (nextChapters) {
           setSelectedChapterId(resolveSelectedChapterIdForRoute({
             route,
             chapters: nextChapters,
             currentChapterId: selectedChapterId,
-            currentScopeProjectId: timelineScopeProjectId.current,
+            currentScopeProjectId: previousProjectId,
           }));
         }
         if (dataNeeds.projectList) {
@@ -268,6 +276,7 @@ function App() {
 
   function updateTimeline(nextTimeline) {
     hasUnsavedTimeline.current = true;
+    timelineRevision.current += 1;
     setTimeline(nextTimeline);
   }
 
@@ -293,15 +302,16 @@ function App() {
   }
 
   function applyChapters(nextChapters, nextProjectId = timelineScopeProjectId.current) {
+    // Read the scope before the ref moves below; the setState updater runs after this function
+    // returns, so reading the ref inside it always saw the new project and never reset the chapter.
+    const previousProjectId = timelineScopeProjectId.current;
     setChapters(nextChapters);
-    setSelectedChapterId((currentId) => {
-      const allowed = resolveChaptersProjectSwitch({
-        nextProjectId,
-        currentScopeProjectId: timelineScopeProjectId.current,
-        currentChapterId: currentId,
-      });
-      return nextChapters.some((chapter) => chapter.id === allowed) ? allowed : '';
-    });
+    setSelectedChapterId((currentId) => resolveChapterSelectionAfterChaptersLoad({
+      previousProjectId,
+      nextProjectId,
+      currentChapterId: currentId,
+      chapters: nextChapters,
+    }));
     if (nextProjectId) {
       timelineScopeProjectId.current = nextProjectId;
     }
@@ -449,7 +459,9 @@ function App() {
       setProject(data);
       setAnalysis(null);
       setTimeline(emptyTimeline);
-      timelineScopeProjectId.current = data.id;
+      hasUnsavedTimeline.current = false;
+      // loadChapters -> applyChapters moves the scope ref and clears a chapter that was selected
+      // in the project we are coming from. Setting the ref here first defeated that reset.
       await loadChapters(data.id);
       await loadProjectList();
       navigateTo({ page: 'chapters', projectId: data.id });
@@ -462,6 +474,15 @@ function App() {
 
   async function analyzeProject(chapterForAnalysis = selectedChapter) {
     if (!project) return;
+    // The backend rebuilds the segment list from the new analysis, so local cue edits cannot be
+    // merged into it. Ask before dropping them instead of keeping a page copy that disagrees with
+    // the timeline.json the renderer reads.
+    let discardLocalEdits = false;
+    if (hasUnsavedTimeline.current) {
+      if (!window.confirm('重新分析会按新的分段结果重建时间轴，未保存的时间轴修改将丢失。继续？')) return;
+      discardLocalEdits = true;
+      hasUnsavedTimeline.current = false;
+    }
     setSelectedChapterId(chapterForAnalysis?.id || '');
     setBusy('analyzing');
     setError('');
@@ -480,6 +501,7 @@ function App() {
         hasUnsavedTimeline: hasUnsavedTimeline.current,
         localTimeline: currentTimeline,
         remoteTimeline: data.timeline,
+        discardLocal: discardLocalEdits,
       }));
       setSelectedSegmentIndex(0);
       setAnalysisProgress(completeAnalysisProgress());
@@ -491,6 +513,10 @@ function App() {
       });
       completed = true;
     } catch (err) {
+      if (discardLocalEdits) {
+        // The analysis never landed, so keep warning about the edits we did not drop.
+        hasUnsavedTimeline.current = true;
+      }
       setError(err.message);
     } finally {
       setBusy('');
@@ -568,15 +594,22 @@ function App() {
     setIsTimelineSaving(true);
     setBusy('timeline');
     setError('');
+    const revisionAtSave = timelineRevision.current;
     try {
-      hasUnsavedTimeline.current = false;
       const data = await request(`/api/projects/${project.id}/timeline`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(timeline),
       });
-      setTimeline(data);
       await loadProjectList();
+      if (isTimelineSaveStale({ revisionAtSave, currentRevision: timelineRevision.current })) {
+        // This response echoes the payload from before the newest edit. Applying it would drop
+        // that edit, and reporting success would let a render start from the stale audio.
+        setError('时间轴在保存过程中又被修改，最新修改还没有保存，请再保存一次。');
+        return false;
+      }
+      hasUnsavedTimeline.current = false;
+      setTimeline(data);
       return true;
     } catch (err) {
       setError(err.message);
@@ -589,6 +622,7 @@ function App() {
 
   async function renderAudio() {
     if (!project) return;
+    setIsRendering(true);
     setBusy('rendering');
     setError('');
     try {
@@ -605,13 +639,15 @@ function App() {
       setError(err.message);
     } finally {
       setBusy('');
+      setIsRendering(false);
     }
   }
 
-  const renderBusy = Boolean(busy) || isTimelineSaving;
+  const renderBusy = isRenderBusy({ busy, isTimelineSaving, isRendering });
 
   function updateSegment(id, patch) {
     hasUnsavedTimeline.current = true;
+    timelineRevision.current += 1;
     setTimeline((current) => ({
       ...current,
       segments: current.segments.map((segment) => (segment.id === id ? { ...segment, ...patch } : segment)),
@@ -1655,9 +1691,22 @@ async function request(url, options = {}) {
   const contentType = response.headers.get('content-type') || '';
   const data = contentType.includes('application/json') ? await response.json() : await response.text();
   if (!response.ok) {
-    throw new Error(typeof data === 'string' ? data : data.detail || '请求失败');
+    throw new Error(readErrorMessage(data));
   }
   return data;
+}
+
+function readErrorMessage(data) {
+  if (typeof data === 'string') return data || '请求失败';
+  const detail = data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    // FastAPI validation errors arrive as a list; new Error(list) renders as "[object Object]".
+    const [first] = detail;
+    const field = Array.isArray(first?.loc) ? first.loc.filter((part) => part !== 'body').join('.') : '';
+    return `请求参数无效${field ? `（${field}）` : ''}：${first?.msg || '校验失败'}`;
+  }
+  return '请求失败';
 }
 
 createRoot(document.getElementById('root')).render(<App />);

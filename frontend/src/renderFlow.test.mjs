@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { runRenderFlow } from './renderFlow.js';
+import { isRenderBusy, runRenderFlow } from './renderFlow.js';
 
 const calls = [];
 
@@ -53,3 +53,12 @@ await assert.rejects(
   /PATCH \/timeline failed/,
 );
 assert.deepEqual(calls, ['persist']);
+
+// The timeline save clears its own busy flag before the render request starts, so the render
+// has to keep the buttons disabled on its own. Without this the 生成音频 button became
+// clickable again for the whole POST /render and a second click re-synthesized every chunk.
+assert.equal(isRenderBusy({ busy: 'rendering' }), true);
+assert.equal(isRenderBusy({ isTimelineSaving: true }), true);
+assert.equal(isRenderBusy({ busy: '', isTimelineSaving: false, isRendering: true }), true);
+assert.equal(isRenderBusy({ busy: '', isTimelineSaving: false, isRendering: false }), false);
+assert.equal(isRenderBusy({}), false);

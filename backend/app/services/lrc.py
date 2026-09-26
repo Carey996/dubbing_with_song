@@ -8,6 +8,16 @@ from difflib import SequenceMatcher
 from fastapi import HTTPException
 
 
+def decode_lrc_content(raw: bytes) -> str:
+    """Decode an uploaded LRC file, reporting bad input as 400 instead of a 500."""
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded LRC file is empty.")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="LRC file must be UTF-8 encoded.") from exc
+
+
 @dataclass(frozen=True)
 class LrcLine:
     index: int

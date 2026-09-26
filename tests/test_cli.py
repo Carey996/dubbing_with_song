@@ -4,9 +4,10 @@ from pathlib import Path
 
 from backend.app import cli
 from backend.app.cli import run
+from backend.app.services import project_store
 
 
-TEST_INPUT_DIR = Path("data/test-inputs")
+TEST_INPUT_DIR = project_store.DATA_DIR / "test-inputs"
 
 
 def fake_analysis(text: str, chapters=None) -> dict:
