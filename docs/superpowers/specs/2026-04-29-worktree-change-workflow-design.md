@@ -12,7 +12,7 @@ It does not apply to read-only inspection, command output checks, or cases where
 
 ## Trunk Branch
 
-The current trunk branch for this repository is `master`. Future agents should verify the actual trunk branch before merging, because the project may later rename it.
+The current trunk branch for this repository is `main` (it was renamed from `master`, which still appears in older notes). Future agents should verify the actual trunk branch before merging, because the project may rename it again.
 
 ## Start-of-Change Flow
 

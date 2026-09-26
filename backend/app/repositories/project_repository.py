@@ -263,6 +263,14 @@ def fail_render_record(project_id: str, render_id: str, error: str, updated_at: 
         conn.execute(read_sql("update_project_failed.sql"), {"project_id": project_id, "updated_at": updated_at})
 
 
+def delete_render_record(project_id: str, render_id: str, output_path: str | None) -> None:
+    initialize_database()
+    with transaction() as conn:
+        conn.execute(read_sql("delete_render.sql"), {"id": render_id, "project_id": project_id})
+        if output_path:
+            conn.execute(read_sql("delete_asset.sql"), {"project_id": project_id, "path": output_path})
+
+
 def list_renders(project_id: str) -> list[dict]:
     initialize_database()
     with transaction() as conn:
@@ -298,5 +306,6 @@ def register_asset(conn, project_id: str, asset_type: str, path: Path, created_a
             "size_bytes": path.stat().st_size,
             "created_at": created_at,
             "metadata_json": json.dumps(metadata or {}, ensure_ascii=False),
+            "overwrite_metadata": 1 if metadata else 0,
         },
     )
