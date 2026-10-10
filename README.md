@@ -42,6 +42,44 @@ TTS_INSTRUCTIONS=用克制但带紧张感的悬疑旁白朗读，保留自然停
 
 如果某个 TTS 服务不支持 instructions，或你想让模型只读原文，可以把它设成空白值关闭。
 
+### MiniMax（文本 + 语音同一个 key）
+
+MiniMax 的文本接口兼容 OpenAI，所以 LLM 侧只要换 base URL 和模型名，无需改代码；
+语音侧走的是 MiniMax 自己的 `POST /v1/t2a_v2`（没有 `/v1/audio/speech`），后端有专门的 provider 实现：
+
+```env
+# LLM
+OPENAI_API_KEY=sk-...你的 MiniMax key...
+OPENAI_BASE_URL=https://api.minimax.cn/v1
+OPENAI_MODEL=MiniMax-M3.1-Flash-Preview
+
+# TTS
+TTS_PROVIDER=minimax
+TTS_API_KEY=sk-...同一个 key...
+TTS_BASE_URL=https://api.minimax.cn/v1
+TTS_MODEL=speech-2.8-hd
+TTS_VOICE=female-yujie
+TTS_SPEED=1.0
+TTS_RESPONSE_FORMAT=wav
+TTS_INSTRUCTIONS=
+```
+
+要点：
+
+- **base URL 必须是国内站**（`api.minimax.cn` 或 `api.minimaxi.com`）。拿同一个 key 打 `api.minimax.io`（国际站）会返回 `status_code 2049 invalid api key`。
+- `TTS_RESPONSE_FORMAT=wav` 时 MiniMax 直出 **22.05 kHz 单声道 16bit WAV**，正好是内部旁白拼接的格式，**旁白路径完全不需要 ffmpeg**；设成 `mp3` 则和 OpenRouter 一样需要 ffmpeg 转码。
+- MiniMax **没有自由文本 `instructions` 字段**，请把 `TTS_INSTRUCTIONS` 留空。情绪改由 `voice_setting.emotion` 传递：分析器给的 `gentle→calm`、`excited→happy`、`angry/sad/fearful/happy` 直传，`neutral/tense` 不传（让模型自己判断）。
+- 音色要用 MiniMax 的音色 id（`female-yujie`、`male-qn-jingying`、`female-chengshu`、`female-shaonv` 等，共 303 个系统音色），`alloy` 这类 OpenAI 音色名无效。`TTS_SPEED` 会被夹到 MiniMax 允许的 `[0.5, 2]`。
+- 需要强制语种时设 `TTS_LANGUAGE_BOOST=Chinese`（默认 `auto`，由 MiniMax 自动识别）。
+- MiniMax 把限流作为业务错误返回（`1002` rate limit、`1039` TPM rate limit）。渲染会按 `TTS_MAX_ATTEMPTS`（默认 3）做指数退避重试，间隔由 `TTS_RETRY_BASE_DELAY`（默认 1 秒，上限 30 秒）控制，单次请求超时用 `TTS_TIMEOUT_SECONDS`（默认 60）。
+
+```env
+TTS_LANGUAGE_BOOST=Chinese
+TTS_MAX_ATTEMPTS=3
+TTS_RETRY_BASE_DELAY=1.0
+TTS_TIMEOUT_SECONDS=60
+```
+
 AI 分析会为每个片段补充 `speakerName`、`speakerGender`、`emotion`、`voiceStyle` 和 `delivery`。渲染时后端会把这些逐段写入 speech API 的配音提示；如果使用 Gemini TTS，还会把部分情绪转换成 inline style tags 放进输入文本。需要按男女声或角色区分 provider voice 时，可以配置：
 
 ```env
@@ -56,7 +94,8 @@ TTS_VOICE_POOL_FEMALE=nova,shimmer
 
 如果正文是中文旁白，不要把 `TTS_MODEL` 配成 `mistralai/voxtral-*`。后端会在中文输入 + Voxtral TTS 组合下直接返回配置错误，避免等到 OpenRouter provider 侧报 `No successful provider responses`。
 
-仓库不提交 `ffmpeg` 二进制文件。请自行安装 `ffmpeg` 并确保它位于系统 `PATH` 中，或者显式配置本地可执行文件路径：
+仓库不提交 `ffmpeg` 二进制文件。请自行安装 `ffmpeg` 并确保它位于系统 `PATH` 中，或者显式配置本地可执行文件路径。
+使用 `TTS_PROVIDER=minimax` + `TTS_RESPONSE_FORMAT=wav` 时旁白路径不需要 ffmpeg，但歌词片段卡点混音仍然需要：
 
 ```env
 FFMPEG_PATH=D:\path\to\ffmpeg.exe
