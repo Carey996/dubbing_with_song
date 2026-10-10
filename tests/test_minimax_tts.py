@@ -191,12 +191,19 @@ def test_build_payload_omits_emotion_it_cannot_map(monkeypatch):
     assert payload["language_boost"] == "auto"
 
 
-def test_build_payload_never_sends_instructions(monkeypatch):
-    monkeypatch.setenv("TTS_INSTRUCTIONS", "用低沉的语气朗读。")
-
-    payload = minimax_tts.build_payload(text="旁白。", model="speech-2.8-hd", voice="female-yujie", segment=None)
+def test_build_payload_never_sends_an_instructions_field():
+    # TTS_INSTRUCTIONS and the free-text delivery prompt were removed together with the
+    # OpenAI-compatible provider; MiniMax steers delivery through voice_setting.emotion only.
+    payload = minimax_tts.build_payload(
+        text="旁白。",
+        model="speech-2.8-hd",
+        voice="female-yujie",
+        segment={"emotion": "sad", "delivery": "用低沉的语气朗读。", "voiceStyle": "middle_male_deep"},
+    )
 
     assert "instructions" not in payload, "MiniMax has no free-text instructions field"
+    assert payload["voice_setting"]["emotion"] == "sad"
+    assert "用低沉的语气朗读。" not in json.dumps(payload, ensure_ascii=False)
 
 
 def test_build_payload_uses_a_space_for_empty_text():
@@ -279,6 +286,17 @@ def test_attempt_request_does_not_retry_a_parameter_error(monkeypatch):
     assert result.retryable is False
     assert result.status_code == 502
     assert "2013" in result.error
+
+
+def test_attempt_request_explains_the_site_mismatch_code(monkeypatch):
+    # 2049 is what the China endpoint returns for a key issued on the international site.
+    install_transport(monkeypatch, [success_body(audio=b"", status_code=2049, status_msg="invalid api key")])
+
+    result = minimax_tts.attempt_request(build_request())
+
+    assert result.retryable is False
+    assert "2049" in result.error
+    assert "站点不匹配" in result.error
 
 
 def test_attempt_request_reports_auth_failure_with_the_right_code(monkeypatch):
@@ -408,7 +426,7 @@ def test_failure_detail_lists_the_configuration_and_the_china_domain_hint():
 
 
 def enable_minimax(monkeypatch, audio_format_value: str = "wav") -> None:
-    monkeypatch.setenv("TTS_PROVIDER", "minimax")
+    # MiniMax is the only provider now, so there is no TTS_PROVIDER to set.
     monkeypatch.setenv("TTS_API_KEY", "test-key")
     monkeypatch.setenv("TTS_BASE_URL", "https://api.minimax.cn/v1")
     monkeypatch.setenv("TTS_MODEL", "speech-2.8-hd")
@@ -416,7 +434,7 @@ def enable_minimax(monkeypatch, audio_format_value: str = "wav") -> None:
     monkeypatch.setenv("TTS_RESPONSE_FORMAT", audio_format_value)
 
 
-def test_synthesize_wav_with_minimax_writes_a_wav_the_renderer_can_concatenate(monkeypatch, tmp_path):
+def test_synthesize_wav_writes_a_wav_the_renderer_can_concatenate(monkeypatch, tmp_path):
     enable_minimax(monkeypatch)
     install_transport(monkeypatch, [success_body()])
     output_path = tmp_path / "segment.wav"
@@ -492,7 +510,7 @@ def test_synthesize_wav_surfaces_a_minimax_failure_as_an_http_error(monkeypatch,
     assert "TTS_API_KEY" in str(exc.value.detail)
 
 
-def test_synthesize_wav_with_minimax_requires_an_api_key(monkeypatch, tmp_path):
+def test_synthesize_wav_requires_an_api_key(monkeypatch, tmp_path):
     enable_minimax(monkeypatch)
     monkeypatch.delenv("TTS_API_KEY", raising=False)
 
@@ -501,16 +519,6 @@ def test_synthesize_wav_with_minimax_requires_an_api_key(monkeypatch, tmp_path):
 
     assert exc.value.status_code == 503
     assert "TTS_API_KEY" in str(exc.value.detail)
-
-
-def test_unsupported_provider_lists_minimax(monkeypatch, tmp_path):
-    monkeypatch.setenv("TTS_PROVIDER", "elevenlabs")
-
-    with pytest.raises(HTTPException) as exc:
-        renderer.synthesize_wav("旁白。", tmp_path / "segment.wav")
-
-    assert exc.value.status_code == 503
-    assert "minimax" in str(exc.value.detail)
 
 
 def test_minimax_provider_reuses_the_voice_pool_mapping(monkeypatch, tmp_path):

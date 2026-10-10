@@ -64,6 +64,7 @@ STATUS_MESSAGES = {
     1039: "MiniMax 触发 TPM 限流",
     1042: "文本中无效字符超过 10%",
     2013: "MiniMax 参数不合法",
+    2049: "鉴权失败：API key 无效，或与当前站点不匹配（国内站用 api.minimax.cn / api.minimaxi.com）",
 }
 
 

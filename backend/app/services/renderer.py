@@ -8,22 +8,12 @@ import wave
 from pathlib import Path
 
 from fastapi import HTTPException
-from openai import OpenAI
 
 from . import minimax_tts
 from .project_store import Project, read_timeline
 
 BASE_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
-DEFAULT_TTS_VOICE = "alloy"
-DEFAULT_TTS_INSTRUCTIONS = (
-    "用自然、有情绪的中文有声书旁白风格朗读。根据句意调整语气、停顿和强弱；"
-    "对白更口语，叙述更沉稳；紧张处略微加快并压低，温柔处放慢并柔和。"
-    "不要读出舞台提示或说明，只朗读正文。"
-)
-DEFAULT_OPENROUTER_TTS_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_TTS_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
-DEFAULT_MINIMAX_TTS_MODEL = minimax_tts.DEFAULT_MODEL
+DEFAULT_TTS_VOICE = "female-yujie"
 BUNDLED_FFMPEG_PATH = BASE_DIR / "tools" / "ffmpeg" / "windows-x64" / "ffmpeg.exe"
 
 
@@ -194,33 +184,19 @@ def resolve_lyric_segment_song_paths(project: Project, timeline: dict) -> dict[s
 
 
 def synthesize_wav(text: str, output_path: Path, segment: dict | None = None) -> None:
-    provider = os.getenv("TTS_PROVIDER", "openrouter").strip().lower()
-    if provider == "openrouter":
-        synthesize_wav_with_openrouter(text, output_path, segment=segment)
-        return
-    if provider == "openai":
-        synthesize_wav_with_openai(text, output_path, segment=segment)
-        return
-    if provider == "minimax":
-        synthesize_wav_with_minimax(text, output_path, segment=segment)
-        return
+    """Synthesize one segment through MiniMax ``/v1/t2a_v2``.
 
-    raise HTTPException(
-        status_code=503,
-        detail=f"Unsupported TTS_PROVIDER: {provider}. Use openrouter, openai or minimax.",
-    )
-
-
-def synthesize_wav_with_minimax(text: str, output_path: Path, segment: dict | None = None) -> None:
-    """MiniMax ``/v1/t2a_v2``.
+    MiniMax is the only supported speech provider and is deliberately not configurable: it is not
+    OpenAI-compatible (there is no ``/v1/audio/speech``), so ``TTS_PROVIDER`` no longer exists and
+    the whole protocol lives in ``minimax_tts``.
 
     With ``TTS_RESPONSE_FORMAT=wav`` MiniMax returns 22.05 kHz mono 16-bit PCM, which is exactly
-    what the narration concatenation expects, so no ffmpeg is involved. ``mp3`` falls back to the
-    same ffmpeg conversion the OpenRouter path uses.
+    the format the narration concatenation expects, so the narration path needs no ffmpeg at all.
+    ``mp3`` output is converted with ffmpeg.
     """
 
     api_key = require_tts_api_key()
-    model = get_tts_model(DEFAULT_MINIMAX_TTS_MODEL)
+    model = get_tts_model(minimax_tts.DEFAULT_MODEL)
     voice = get_tts_voice(segment)
     audio_format = minimax_tts.audio_format()
     payload = minimax_tts.build_payload(
@@ -268,91 +244,6 @@ def synthesize_wav_with_minimax(text: str, output_path: Path, segment: dict | No
         raise HTTPException(status_code=502, detail="MiniMax TTS returned an empty audio file.")
 
 
-def synthesize_wav_with_openai(text: str, output_path: Path, segment: dict | None = None) -> None:
-    synthesize_audio_with_openai_compatible(
-        text=text,
-        output_path=output_path,
-        default_base_url=None,
-        default_model=DEFAULT_TTS_MODEL,
-        response_format="wav",
-        segment=segment,
-    )
-
-
-def synthesize_wav_with_openrouter(text: str, output_path: Path, segment: dict | None = None) -> None:
-    mp3_path = output_path.with_suffix(".mp3")
-    response_format = os.getenv("TTS_RESPONSE_FORMAT", "mp3").strip().lower()
-    if response_format != "mp3":
-        raise HTTPException(status_code=503, detail="OpenRouter TTS currently requires TTS_RESPONSE_FORMAT=mp3 so ffmpeg can convert it to WAV.")
-
-    require_tts_api_key()
-    model = get_tts_model(DEFAULT_OPENROUTER_TTS_MODEL)
-    validate_openrouter_tts_request(text, model)
-    synthesize_audio_with_openai_compatible(
-        text=text,
-        output_path=mp3_path,
-        default_base_url=DEFAULT_OPENROUTER_TTS_BASE_URL,
-        default_model=model,
-        response_format=response_format,
-        segment=segment,
-    )
-
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg:
-        raise HTTPException(status_code=503, detail="Missing ffmpeg. OpenRouter TTS returns MP3, so ffmpeg is required to convert it to WAV.")
-    convert_audio_to_wav(ffmpeg, mp3_path, output_path)
-
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        raise HTTPException(status_code=502, detail="OpenRouter TTS conversion returned an empty WAV file.")
-
-
-def synthesize_audio_with_openai_compatible(
-    text: str,
-    output_path: Path,
-    default_base_url: str | None,
-    default_model: str,
-    response_format: str,
-    segment: dict | None = None,
-) -> None:
-    api_key = require_tts_api_key()
-
-    client_kwargs = {"api_key": api_key}
-    base_url = os.getenv("TTS_BASE_URL") or default_base_url
-    if base_url:
-        client_kwargs["base_url"] = base_url
-
-    client = OpenAI(**client_kwargs)
-    model = get_tts_model(default_model)
-    voice = get_tts_voice(segment)
-    request_kwargs = {
-        "model": model,
-        "voice": voice,
-        "input": build_tts_input(text or " ", model, segment),
-        "response_format": response_format,
-        "speed": float(os.getenv("TTS_SPEED", "1.0")),
-    }
-    instructions = build_tts_instructions(segment)
-    if instructions:
-        request_kwargs["instructions"] = instructions
-
-    try:
-        response = client.audio.speech.create(**request_kwargs)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        response.write_to_file(output_path)
-    except Exception as exc:
-        status_code, detail = build_tts_failure_detail(
-            exc=exc,
-            base_url=base_url,
-            model=model,
-            voice=voice,
-            response_format=response_format,
-        )
-        raise HTTPException(status_code=status_code, detail=detail) from exc
-
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        raise HTTPException(status_code=502, detail="AI TTS returned an empty audio file.")
-
-
 def require_tts_api_key() -> str:
     api_key = os.getenv("TTS_API_KEY")
     if not api_key:
@@ -362,47 +253,6 @@ def require_tts_api_key() -> str:
 
 def get_tts_model(default_model: str) -> str:
     return os.getenv("TTS_MODEL", default_model).strip() or default_model
-
-
-def get_tts_instructions() -> str | None:
-    configured = os.getenv("TTS_INSTRUCTIONS")
-    if configured is None:
-        return DEFAULT_TTS_INSTRUCTIONS
-    normalized = configured.strip()
-    return normalized or None
-
-
-def build_tts_instructions(segment: dict | None = None) -> str | None:
-    base = get_tts_instructions()
-    if not segment:
-        return base
-    if base is None:
-        return None
-
-    details = [
-        f"当前片段说话人：{normalize_segment_value(segment.get('speakerName'), '旁白')}",
-        f"说话人性别：{normalize_segment_value(segment.get('speakerGender'), 'unknown')}",
-        f"情绪：{normalize_segment_value(segment.get('emotion'), 'neutral')}",
-        f"音色风格：{normalize_segment_value(segment.get('voiceStyle'), 'neutral_narrator')}",
-        f"朗读方式：{normalize_segment_value(segment.get('delivery'), '自然清晰，保持中文有声书旁白节奏。')}",
-        "保持同一说话人的声音一致；不要读出这些配音提示，只朗读正文。",
-    ]
-    return "\n".join([base, *details])
-
-
-def build_tts_input(text: str, model: str, segment: dict | None = None) -> str:
-    if not segment or not is_gemini_tts_model(model) or tts_style_explicitly_disabled():
-        return text
-
-    tags = get_gemini_style_tags(segment)
-    if not tags:
-        return text
-    return f"{' '.join(tags)} {text}"
-
-
-def tts_style_explicitly_disabled() -> bool:
-    configured = os.getenv("TTS_INSTRUCTIONS")
-    return configured is not None and not configured.strip()
 
 
 def get_tts_voice(segment: dict | None = None) -> str:
@@ -435,84 +285,9 @@ def get_voice_pool(gender: str) -> list[str]:
     return [item.strip() for item in configured.split(",") if item.strip()]
 
 
-def is_gemini_tts_model(model: str) -> bool:
-    normalized = (model or "").lower()
-    return "gemini" in normalized and "tts" in normalized
-
-
-def get_gemini_style_tags(segment: dict) -> list[str]:
-    emotion = normalize_segment_value(segment.get("emotion"), "neutral").lower()
-    delivery = normalize_segment_value(segment.get("delivery"), "").lower()
-    tags = []
-    if emotion in {"angry", "excited", "sad"}:
-        tags.append(f"[{emotion}]")
-    if emotion in {"tense", "fearful", "gentle"} or "低声" in delivery or "压低" in delivery:
-        tags.append("[whispers]")
-    return tags[:2]
-
-
 def normalize_segment_value(value, fallback: str) -> str:
     normalized = str(value or "").strip()
     return normalized or fallback
-
-
-def validate_openrouter_tts_request(text: str, model: str) -> None:
-    normalized_model = model.lower()
-    if normalized_model.startswith("mistralai/voxtral") and contains_cjk(text):
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"OpenRouter TTS config is not suitable for Chinese narration: TTS_MODEL={model}. "
-                "Voxtral TTS is likely to fail for 中文 input; choose a speech model that supports Chinese, "
-                "or switch TTS_PROVIDER to another configured TTS service."
-            ),
-        )
-
-
-def contains_cjk(text: str) -> bool:
-    return any("\u4e00" <= char <= "\u9fff" for char in text or "")
-
-
-def build_tts_failure_detail(
-    exc: Exception,
-    base_url: str | None,
-    model: str,
-    voice: str,
-    response_format: str,
-) -> tuple[int, str]:
-    original = str(exc)
-    is_openrouter = bool(base_url and "openrouter.ai" in base_url.lower())
-    is_provider_404 = getattr(exc, "status_code", None) == 404 or "Error code: 404" in original
-    is_provider_403 = getattr(exc, "status_code", None) == 403 or "Error code: 403" in original
-    no_successful_provider = "No successful provider responses" in original
-
-    if is_openrouter and is_provider_404 and no_successful_provider:
-        return (
-            503,
-            (
-                "OpenRouter TTS provider returned 404: No successful provider responses. "
-                f"Check TTS_MODEL={model}, TTS_VOICE={voice}, TTS_RESPONSE_FORMAT={response_format}, "
-                "input language support, and OpenRouter key/credits. "
-                f"Original error: {original}"
-            ),
-        )
-
-    if is_openrouter and is_provider_403:
-        return (
-            503,
-            (
-                "OpenRouter TTS provider rejected the speech request due to provider policy/moderation. "
-                "If a tiny harmless test sentence is also rejected, this is likely an OpenRouter account, model, "
-                "or upstream speech-provider access issue rather than a timeline text issue. "
-                f"Check TTS_MODEL={model}, TTS_VOICE={voice}, TTS_RESPONSE_FORMAT={response_format}, "
-                "OpenRouter key/credits, and whether the selected provider currently allows audio speech. "
-                "If the rejected segment is actually a lyric or song-like segment, upload the MP3 and align that "
-                "lyric segment instead of synthesizing it with TTS. "
-                f"Original error: {original}"
-            ),
-        )
-
-    return 502, f"AI TTS failed: {original}"
 
 
 def find_ffmpeg() -> str | None:

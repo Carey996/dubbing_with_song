@@ -20,58 +20,33 @@ OPENAI_MODEL=gemma-4-e4b-it@q4_k_m
 
 如果换成 OpenAI 官方服务，把 `OPENAI_BASE_URL` 删除或改成官方兼容地址，并把 `OPENAI_API_KEY` 改成真实 key。文本分析只走 LangChain LLM；没有 `OPENAI_API_KEY` 会直接报配置错误。
 
-TTS 默认走 OpenRouter 的 OpenAI-compatible speech API，不再使用 PowerShell/System.Speech 降级：
+语音合成只走 MiniMax 的 `POST /v1/t2a_v2`，没有 provider 开关，也不再使用 PowerShell/System.Speech 降级：
 
 ```env
-TTS_PROVIDER=openrouter
-TTS_API_KEY=你的 OpenRouter API key
-TTS_BASE_URL=https://openrouter.ai/api/v1
-TTS_MODEL=openai/gpt-4o-mini-tts-2025-12-15
-TTS_VOICE=alloy
-TTS_SPEED=1.0
-TTS_RESPONSE_FORMAT=mp3
-```
-
-OpenRouter 的 TTS 输出使用 MP3，后端会先保存 MP3，再用 `ffmpeg` 转成内部拼接需要的 WAV。当前 LM Studio 的本地 OpenAI-compatible 服务可用于文本模型，但不支持本项目需要的 `/v1/audio/speech` 方式，不能直接作为 TTS 服务。
-
-后端默认会给 speech API 传一段“中文有声书旁白”风格的 `instructions`，让模型按语义调整语气、停顿和强弱，避免旁白过于平。需要换风格时可以在 `.env` 里配置：
-
-```env
-TTS_INSTRUCTIONS=用克制但带紧张感的悬疑旁白朗读，保留自然停顿和情绪起伏。
-```
-
-如果某个 TTS 服务不支持 instructions，或你想让模型只读原文，可以把它设成空白值关闭。
-
-### MiniMax（文本 + 语音同一个 key）
-
-MiniMax 的文本接口兼容 OpenAI，所以 LLM 侧只要换 base URL 和模型名，无需改代码；
-语音侧走的是 MiniMax 自己的 `POST /v1/t2a_v2`（没有 `/v1/audio/speech`），后端有专门的 provider 实现：
-
-```env
-# LLM
-OPENAI_API_KEY=sk-...你的 MiniMax key...
-OPENAI_BASE_URL=https://api.minimax.cn/v1
-OPENAI_MODEL=MiniMax-M3.1-Flash-Preview
-
-# TTS
-TTS_PROVIDER=minimax
-TTS_API_KEY=sk-...同一个 key...
+TTS_API_KEY=你的 MiniMax key
 TTS_BASE_URL=https://api.minimax.cn/v1
 TTS_MODEL=speech-2.8-hd
 TTS_VOICE=female-yujie
 TTS_SPEED=1.0
 TTS_RESPONSE_FORMAT=wav
-TTS_INSTRUCTIONS=
+```
+
+同一个 MiniMax key 可以同时用于文本分析和语音：MiniMax 的文本接口兼容 OpenAI，所以 LLM 侧只要换 base URL 和模型名，无需改代码。
+
+```env
+OPENAI_API_KEY=sk-...同一个 key...
+OPENAI_BASE_URL=https://api.minimax.cn/v1
+OPENAI_MODEL=MiniMax-M3.1-Flash-Preview
 ```
 
 要点：
 
 - **base URL 必须是国内站**（`api.minimax.cn` 或 `api.minimaxi.com`）。拿同一个 key 打 `api.minimax.io`（国际站）会返回 `status_code 2049 invalid api key`。
-- `TTS_RESPONSE_FORMAT=wav` 时 MiniMax 直出 **22.05 kHz 单声道 16bit WAV**，正好是内部旁白拼接的格式，**旁白路径完全不需要 ffmpeg**；设成 `mp3` 则和 OpenRouter 一样需要 ffmpeg 转码。
-- MiniMax **没有自由文本 `instructions` 字段**，请把 `TTS_INSTRUCTIONS` 留空。情绪改由 `voice_setting.emotion` 传递：分析器给的 `gentle→calm`、`excited→happy`、`angry/sad/fearful/happy` 直传，`neutral/tense` 不传（让模型自己判断）。
+- `TTS_RESPONSE_FORMAT=wav`（默认）时 MiniMax 直出 **22.05 kHz 单声道 16bit WAV**，正好是内部旁白拼接的格式，**旁白路径完全不需要 ffmpeg**；设成 `mp3` 则需要 ffmpeg 转码。
+- MiniMax **没有自由文本 instructions 字段**（`TTS_INSTRUCTIONS` 已随之移除）。情绪改由 `voice_setting.emotion` 传递：分析器给出的 `gentle→calm`、`excited→happy`、`angry/sad/fearful/happy` 直传，`neutral/tense` 不传（让模型自己判断）；`speech-2.8` 不支持 `whisper`，后端会自动丢弃该值而不是让请求报错。
 - 音色要用 MiniMax 的音色 id（`female-yujie`、`male-qn-jingying`、`female-chengshu`、`female-shaonv` 等，共 303 个系统音色），`alloy` 这类 OpenAI 音色名无效。`TTS_SPEED` 会被夹到 MiniMax 允许的 `[0.5, 2]`。
 - 需要强制语种时设 `TTS_LANGUAGE_BOOST=Chinese`（默认 `auto`，由 MiniMax 自动识别）。
-- MiniMax 把限流作为业务错误返回（`1002` rate limit、`1039` TPM rate limit）。渲染会按 `TTS_MAX_ATTEMPTS`（默认 3）做指数退避重试，间隔由 `TTS_RETRY_BASE_DELAY`（默认 1 秒，上限 30 秒）控制，单次请求超时用 `TTS_TIMEOUT_SECONDS`（默认 60）。
+- MiniMax 把限流作为业务错误返回（`1002` rate limit、`1039` TPM rate limit），`1004` 表示鉴权失败。渲染会按 `TTS_MAX_ATTEMPTS`（默认 3）做指数退避重试，间隔由 `TTS_RETRY_BASE_DELAY`（默认 1 秒，上限 30 秒）控制，单次请求超时用 `TTS_TIMEOUT_SECONDS`（默认 60）；鉴权与参数类错误不重试，失败信息会带上当前配置。
 
 ```env
 TTS_LANGUAGE_BOOST=Chinese
@@ -80,22 +55,20 @@ TTS_RETRY_BASE_DELAY=1.0
 TTS_TIMEOUT_SECONDS=60
 ```
 
-AI 分析会为每个片段补充 `speakerName`、`speakerGender`、`emotion`、`voiceStyle` 和 `delivery`。渲染时后端会把这些逐段写入 speech API 的配音提示；如果使用 Gemini TTS，还会把部分情绪转换成 inline style tags 放进输入文本。需要按男女声或角色区分 provider voice 时，可以配置：
+AI 分析会为每个片段补充 `speakerName`、`speakerGender`、`emotion`、`voiceStyle` 和 `delivery`。渲染时 `emotion` 会映射成 MiniMax 的 `voice_setting.emotion`；需要按男女声或角色区分音色时，可以配置：
 
 ```env
-TTS_VOICE_MALE=onyx
-TTS_VOICE_FEMALE=nova
-TTS_VOICE_UNKNOWN=alloy
-TTS_VOICE_POOL_MALE=onyx,echo
-TTS_VOICE_POOL_FEMALE=nova,shimmer
+TTS_VOICE_MALE=male-qn-jingying
+TTS_VOICE_FEMALE=female-yujie
+TTS_VOICE_UNKNOWN=female-chengshu
+TTS_VOICE_POOL_MALE=male-qn-qingse,male-qn-badao
+TTS_VOICE_POOL_FEMALE=female-shaonv,female-tianmei
 ```
 
 如果配置了 `TTS_VOICE_POOL_*`，同一说话人会稳定映射到同一个 voice；未配置时按 `TTS_VOICE_MALE` / `TTS_VOICE_FEMALE` / `TTS_VOICE_UNKNOWN` 回退，再回到通用 `TTS_VOICE`。
 
-如果正文是中文旁白，不要把 `TTS_MODEL` 配成 `mistralai/voxtral-*`。后端会在中文输入 + Voxtral TTS 组合下直接返回配置错误，避免等到 OpenRouter provider 侧报 `No successful provider responses`。
-
 仓库不提交 `ffmpeg` 二进制文件。请自行安装 `ffmpeg` 并确保它位于系统 `PATH` 中，或者显式配置本地可执行文件路径。
-使用 `TTS_PROVIDER=minimax` + `TTS_RESPONSE_FORMAT=wav` 时旁白路径不需要 ffmpeg，但歌词片段卡点混音仍然需要：
+`TTS_RESPONSE_FORMAT=wav` 时旁白路径不需要 ffmpeg，但歌词片段卡点混音仍然需要：
 
 ```env
 FFMPEG_PATH=D:\path\to\ffmpeg.exe
@@ -223,9 +196,9 @@ WORKFLOW_RUN_CONCURRENCY=2 WORKFLOW_RUN_KEEP_COUNT=20 python -m uvicorn backend.
 
 `POST /api/projects` 只接受 JSON：`{"text": "..."}`。txt 文件上传独立走 `POST /api/projects/text-file`，后端解码为文本后复用同一个项目创建服务入口。MP3 上传独立走 `POST /api/projects/{id}/song-file` 的 multipart 表单，避免创建接口同时兼容多种输入格式。
 
-后端 TTS 必须配置可用的 AI speech API。没有 `TTS_API_KEY`、TTS 服务不可用，或 OpenRouter MP3 无法通过本机 `ffmpeg` 转成 WAV 时，渲染接口会直接返回错误，不再降级生成 PowerShell 语音或静音占位。
+后端 TTS 必须配置可用的 MiniMax speech API。没有 `TTS_API_KEY`、key 无效（`1004`）、触发限流且重试耗尽，或 `TTS_RESPONSE_FORMAT=mp3` 时本机缺少 `ffmpeg`，渲染接口都会直接返回带配置上下文的错误，不再降级生成 PowerShell 语音或静音占位。
 
 ## 后续增强
 
-- 接入更多本地 OpenAI-compatible TTS 服务。
+- 如果以后要接 MiniMax 之外的 TTS 服务，需要重新引入 provider 抽象（当前代码只实现了 MiniMax 协议）。
 - 支持多首歌、多角色配音和自动歌词时间轴对齐。
