@@ -177,3 +177,22 @@ assert.equal(resolveChapterSelectionAfterChaptersLoad({
   currentChapterId: 'chap-999',
   chapters: routeChapters,
 }), '', 'a chapter id that no longer exists is dropped');
+
+// The workflow agent page is a standalone route like /history: it never carries a project scope,
+// it is not part of the three project steps, and it fetches its own data.
+assert.deepEqual(parseWorkflowRoute('/workflows'), { page: 'workflows', projectId: '', chapterId: '' });
+assert.deepEqual(parseWorkflowRoute('/workflows?run=abc'), { page: 'workflows', projectId: '', chapterId: '' });
+assert.equal(buildWorkflowPath({ page: 'workflows' }), '/workflows');
+assert.equal(buildWorkflowPath({ page: 'workflows', projectId: 'p1' }), '/workflows');
+assert.equal(normalizeWorkflowPage('workflows', { project: null, chapters: [], timeline: emptyTimeline }), 'workflows');
+assert.deepEqual(getWorkflowRouteDataNeeds({ page: 'workflows', projectId: '', chapterId: '' }), {
+  projectList: false,
+  projectDetail: false,
+  chapters: false,
+});
+assert.deepEqual(
+  getWorkflowPages({ project: { id: 'p1' }, chapters: [], timeline: emptyTimeline }).map((page) => page.id),
+  ['input', 'chapters', 'analysis'],
+  'the workflow page must not become a fourth project step',
+);
+assert.equal(getDefaultWorkflowPage({ project: null, chapters: [], timeline: emptyTimeline }), 'input');

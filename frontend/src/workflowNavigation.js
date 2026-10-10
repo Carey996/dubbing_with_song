@@ -4,6 +4,8 @@ const PAGE_DEFINITIONS = [
   { id: 'analysis', label: '分析与导出' },
 ];
 
+export const STANDALONE_PAGES = ['history', 'workflows'];
+
 export function getWorkflowPages({ project, timeline = { segments: [] } }) {
   const hasProject = Boolean(project);
 
@@ -15,7 +17,7 @@ export function getWorkflowPages({ project, timeline = { segments: [] } }) {
 }
 
 export function normalizeWorkflowPage(pageId, state) {
-  if (pageId === 'history') return 'history';
+  if (STANDALONE_PAGES.includes(pageId)) return pageId;
   const pages = getWorkflowPages(state);
   return pages.some((page) => page.id === pageId) ? pageId : 'input';
 }
@@ -40,6 +42,11 @@ export function parseWorkflowRoute(pathname = '/') {
 
   if (segments[0] === 'history') {
     return { page: 'history', projectId: '', chapterId: '' };
+  }
+
+  if (segments[0] === 'workflows') {
+    // The workflow agent page owns its own data, so it carries no project scope in the URL.
+    return { page: 'workflows', projectId: '', chapterId: '' };
   }
 
   if (segments[0] !== 'projects' || !segments[1]) {
@@ -67,6 +74,7 @@ export function buildWorkflowPath({ page = 'input', projectId = '', chapterId = 
   const encodedChapterId = chapterId ? encodeURIComponent(chapterId) : '';
 
   if (page === 'history') return '/history';
+  if (page === 'workflows') return '/workflows';
   if (!encodedProjectId) return '/';
   if (page === 'chapters') {
     return encodedChapterId
@@ -82,6 +90,10 @@ export function buildWorkflowPath({ page = 'input', projectId = '', chapterId = 
 }
 
 export function getWorkflowRouteDataNeeds({ page = 'input', projectId = '' } = {}) {
+  if (page === 'workflows') {
+    // WorkflowPage fetches its own catalogue, project list and chapter lists.
+    return { projectList: false, projectDetail: false, chapters: false };
+  }
   return {
     projectList: page === 'input' || page === 'history',
     projectDetail: Boolean(projectId),

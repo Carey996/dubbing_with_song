@@ -12,9 +12,11 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  Workflow as WorkflowIcon,
 } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
 import { advanceAnalysisProgress, completeAnalysisProgress } from './analysisProgress.js';
+import { request } from './api.js';
 import {
   areAllProjectsSelected,
   normalizeSelectedProjectIds,
@@ -50,6 +52,7 @@ import {
   resolveChapterSelectionAfterChaptersLoad,
   resolveSelectedChapterIdForRoute,
 } from './workflowNavigation.js';
+import WorkflowPage from './WorkflowPage.jsx';
 import './styles.css';
 
 const emptyTimeline = {
@@ -771,6 +774,14 @@ function App() {
             </div>
             <button
               type="button"
+              className={`history-entry ${page === 'workflows' ? 'primary' : ''}`}
+              onClick={() => navigateTo({ page: 'workflows' })}
+            >
+              <WorkflowIcon size={18} />
+              工作流
+            </button>
+            <button
+              type="button"
               className={`history-entry ${page === 'history' ? 'primary' : ''}`}
               onClick={() => navigateTo({ page: 'history' })}
             >
@@ -782,6 +793,8 @@ function App() {
       </header>
 
       {error && <div className="notice error">{error}</div>}
+
+      {page === 'workflows' && <WorkflowPage />}
 
       {page === 'history' && (
         <HistoryPage
@@ -1696,29 +1709,6 @@ function formatSpeakerGender(value) {
   if (value === 'female') return '女声';
   if (value === 'male') return '男声';
   return '未知声线';
-}
-
-async function request(url, options = {}) {
-  const response = await fetch(url, options);
-  const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json') ? await response.json() : await response.text();
-  if (!response.ok) {
-    throw new Error(readErrorMessage(data));
-  }
-  return data;
-}
-
-function readErrorMessage(data) {
-  if (typeof data === 'string') return data || '请求失败';
-  const detail = data?.detail;
-  if (typeof detail === 'string') return detail;
-  if (Array.isArray(detail)) {
-    // FastAPI validation errors arrive as a list; new Error(list) renders as "[object Object]".
-    const [first] = detail;
-    const field = Array.isArray(first?.loc) ? first.loc.filter((part) => part !== 'body').join('.') : '';
-    return `请求参数无效${field ? `（${field}）` : ''}：${first?.msg || '校验失败'}`;
-  }
-  return '请求失败';
 }
 
 createRoot(document.getElementById('root')).render(<App />);
