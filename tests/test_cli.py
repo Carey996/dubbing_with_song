@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
 from backend.app import cli
 from backend.app.cli import run
 from backend.app.services import project_store
@@ -48,11 +51,34 @@ def fake_analysis(text: str, chapters=None) -> dict:
     }
 
 
-def write_test_txt(filename: str, text: str) -> Path:
+def write_test_txt(filename: str, text: str, encoding: str = "utf-8") -> Path:
     TEST_INPUT_DIR.mkdir(parents=True, exist_ok=True)
     source = TEST_INPUT_DIR / filename
-    source.write_text(text, encoding="utf-8")
+    source.write_text(text, encoding=encoding)
     return source
+
+
+def test_cli_reads_a_gbk_encoded_txt_file():
+    text = "第一章 夜航\n只有旁白。"
+    source = write_test_txt("cli-gbk-story.txt", text, encoding="gbk")
+
+    payload = run([str(source), "--no-analyze"])
+
+    assert payload["project"]["id"]
+    from backend.app.services.project_store import get_project
+
+    assert get_project(payload["project"]["id"]).text == text
+
+
+def test_cli_rejects_undecodable_txt_file():
+    TEST_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    source = TEST_INPUT_DIR / "cli-binary.txt"
+    source.write_bytes(bytes(range(256)))
+
+    with pytest.raises(HTTPException) as exc:
+        run([str(source), "--no-analyze"])
+
+    assert "gb18030" in str(exc.value.detail)
 
 
 def test_cli_creates_project_from_txt(monkeypatch):

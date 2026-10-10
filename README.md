@@ -135,7 +135,7 @@ RENDER_KEEP_COUNT=5 python -m uvicorn backend.app.main:app --reload --port 28080
 
 ## 当前能力
 
-- 支持粘贴文本或上传 `.txt` 创建项目。
+- 支持粘贴文本或上传 `.txt` 创建项目，`.txt` / `.lrc` 都会自动识别 UTF-8、BOM 标记的 UTF-16/32 与 GBK/GB2312。
 - LangChain LLM 分析器会拆分旁白/疑似歌词段，并给出歌曲候选提示。
 - 独立章节切分 service 会先识别大段 txt 的章节，再按章节送入 LLM 分析。
 - 支持上传单首 MP3 作为全篇 BGM。
@@ -195,6 +195,22 @@ WORKFLOW_RUN_CONCURRENCY=2 WORKFLOW_RUN_KEEP_COUNT=20 python -m uvicorn backend.
 当前 MVP 不负责在线下载音乐。歌曲文件由用户自行提供。
 
 `POST /api/projects` 只接受 JSON：`{"text": "..."}`。txt 文件上传独立走 `POST /api/projects/text-file`，后端解码为文本后复用同一个项目创建服务入口。MP3 上传独立走 `POST /api/projects/{id}/song-file` 的 multipart 表单，避免创建接口同时兼容多种输入格式。
+
+### 上传文件的编码
+
+中文来源的 `.txt` 和 `.lrc` 经常是 GBK，所以上传不再要求 UTF-8。`backend/app/services/text_decoding.py` 按固定顺序解码：
+
+1. **有字节序标记（BOM）就照它解**：UTF-8 / UTF-16 / UTF-32。UTF-16 只在这一步尝试——任意偶数长度的字节都能"成功"解成 UTF-16，靠猜会把每个 UTF-8 文件变成乱码。
+2. **UTF-8 严格解码**，这是本项目自己写文件的编码。
+3. **回退编码**，默认 `gb18030`（GBK、GB2312 的超集）。
+
+UTF-8 能解开纯 ASCII 二进制，GB18030 更是几乎能解开任意字节序列，所以每一步解出来的文本都要通过合理性校验（控制字符 / 私用区 / 未分配码位不超过 1%），否则按二进制处理并返回 400；错误信息里会列出尝试过的编码。
+
+需要其它旧编码（Big5、Shift_JIS 等）时用环境变量指定。注意 GB18030 覆盖面很广，指定别的编码时通常要把它一起替换掉：
+
+```env
+TEXT_FALLBACK_ENCODINGS=big5
+```
 
 后端 TTS 必须配置可用的 MiniMax speech API。没有 `TTS_API_KEY`、key 无效（`1004`）、触发限流且重试耗尽，或 `TTS_RESPONSE_FORMAT=mp3` 时本机缺少 `ffmpeg`，渲染接口都会直接返回带配置上下文的错误，不再降级生成 PowerShell 语音或静音占位。
 

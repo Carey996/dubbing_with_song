@@ -7,15 +7,22 @@ from difflib import SequenceMatcher
 
 from fastapi import HTTPException
 
+from .text_decoding import TextDecodingError, decode_text
+
 
 def decode_lrc_content(raw: bytes) -> str:
-    """Decode an uploaded LRC file, reporting bad input as 400 instead of a 500."""
+    """Decode an uploaded LRC file, reporting bad input as 400 instead of a 500.
+
+    Lyrics files from Chinese sources are often GBK, so the shared decoder accepts UTF-8,
+    BOM-marked UTF-16/32 and the configurable legacy fallbacks (GB18030 by default).
+    """
     if not raw:
         raise HTTPException(status_code=400, detail="Uploaded LRC file is empty.")
     try:
-        return raw.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail="LRC file must be UTF-8 encoded.") from exc
+        text, _encoding = decode_text(raw)
+    except TextDecodingError as exc:
+        raise HTTPException(status_code=400, detail=f"LRC file: {exc.message}") from exc
+    return text
 
 
 @dataclass(frozen=True)

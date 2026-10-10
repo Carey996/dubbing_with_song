@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="dubbing-with-song",
         description="Create and optionally render a dubbing project from a local txt file.",
     )
-    parser.add_argument("txt_file", type=Path, help="UTF-8 .txt source file.")
+    parser.add_argument("txt_file", type=Path, help=".txt source file (UTF-8, BOM-marked UTF-16, or GBK/GB18030).")
     parser.add_argument("--song", type=Path, help="Optional user-provided MP3 file.")
     parser.add_argument("--render", action="store_true", help="Render output audio after analysis.")
     parser.add_argument("--no-analyze", action="store_true", help="Only create the project; skip text analysis.")

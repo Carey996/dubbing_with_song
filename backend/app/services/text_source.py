@@ -5,6 +5,8 @@ from pathlib import Path
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
+from .text_decoding import TextDecodingError, decode_text
+
 
 def read_txt_file(path: Path) -> str:
     if not path.name.lower().endswith(".txt"):
@@ -28,6 +30,7 @@ def decode_txt_content(raw: bytes, empty_detail: str) -> str:
         raise HTTPException(status_code=400, detail=empty_detail)
 
     try:
-        return raw.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Txt file must be UTF-8 encoded.") from exc
+        text, _encoding = decode_text(raw)
+    except TextDecodingError as exc:
+        raise HTTPException(status_code=400, detail=f"Txt file: {exc.message}") from exc
+    return text

@@ -451,7 +451,9 @@ function App() {
         const form = new FormData();
         form.append('file', txtFile);
         data = await request('/api/projects/text-file', { method: 'POST', body: form });
-        setText(await txtFile.text());
+        // Do not preview with txtFile.text(): the browser always decodes as UTF-8, so a GBK
+        // upload would show mojibake. The route change below loads the server-decoded text.
+        setText('');
       } else {
         data = await request('/api/projects', {
           method: 'POST',

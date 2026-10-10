@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import wave
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from backend.app.main import app
 from backend.app.routers import projects
 from backend.app.repositories import db, project_repository
 from backend.app.services import analyzer
+from backend.app.services import lrc as lrc_service
 from backend.app.services import project_store
 from backend.app.services import renderer
 from backend.app.services.chapter_service import TextChapter, split_text_into_chapters
@@ -857,6 +859,60 @@ def test_project_creation_from_txt_file_uses_separate_endpoint():
     assert project["text"] == "文件里的旁白内容。"
 
 
+@pytest.mark.parametrize(
+    "encoding",
+    ["gbk", "gb2312", "gb18030"],
+)
+def test_txt_upload_accepts_legacy_chinese_encodings(encoding):
+    text = "第一章 夜航\n夜里十一点，港口的灯一盏一盏熄灭。"
+
+    created = client.post(
+        "/api/projects/text-file",
+        files={"file": ("demo.txt", text.encode(encoding), "text/plain")},
+    )
+
+    assert created.status_code == 200, created.text
+    project = client.get(f"/api/projects/{created.json()['id']}").json()
+    assert project["text"] == text
+
+
+def test_txt_upload_accepts_a_utf16_file_with_a_bom():
+    text = "第一章 夜航\n旁白内容。"
+
+    created = client.post(
+        "/api/projects/text-file",
+        files={"file": ("demo.txt", codecs.BOM_UTF16_LE + text.encode("utf-16-le"), "text/plain")},
+    )
+
+    assert created.status_code == 200, created.text
+    assert client.get(f"/api/projects/{created.json()['id']}").json()["text"] == text
+
+
+def test_txt_upload_rejects_binary_content_with_a_readable_message():
+    response = client.post(
+        "/api/projects/text-file",
+        files={"file": ("demo.txt", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "utf-8-sig" in detail and "gb18030" in detail
+    assert "TEXT_FALLBACK_ENCODINGS" in detail
+
+
+def test_txt_upload_fallback_encoding_can_be_configured(monkeypatch):
+    text = "第一章 夜航"
+    monkeypatch.setenv("TEXT_FALLBACK_ENCODINGS", "big5")
+
+    created = client.post(
+        "/api/projects/text-file",
+        files={"file": ("demo.txt", text.encode("big5"), "text/plain")},
+    )
+
+    assert created.status_code == 200, created.text
+    assert client.get(f"/api/projects/{created.json()['id']}").json()["text"] == text
+
+
 def test_lyric_detection_and_timeline_update(monkeypatch):
     monkeypatch.setattr(projects, "analyze_text", fake_analysis)
     text = "他停下来听见有人唱。\n\n《小星星》\n一闪一闪亮晶晶\n满天都是小星星"
@@ -1124,7 +1180,7 @@ def test_save_timeline_falls_back_for_non_finite_values():
     assert timeline["segments"][0]["durationSec"] == 2.0
 
 
-def test_chapter_lrc_upload_rejects_non_utf8_content():
+def test_chapter_lrc_upload_rejects_undecodable_content():
     project_id = client.post("/api/projects", json={"text": "第一章\n内容一。"}).json()["id"]
 
     response = client.post(
@@ -1133,7 +1189,31 @@ def test_chapter_lrc_upload_rejects_non_utf8_content():
     )
 
     assert response.status_code == 400
-    assert "UTF-8" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "LRC file" in detail
+    assert "utf-8-sig" in detail and "gb18030" in detail
+
+
+def test_chapter_lrc_upload_accepts_a_gbk_file():
+    project_id = client.post("/api/projects", json={"text": "第一章\n一闪一闪亮晶晶"}).json()["id"]
+    lrc = "[00:12.00]一闪一闪亮晶晶\n[00:18.00]满天都是小星星\n"
+
+    response = client.post(
+        f"/api/projects/{project_id}/chapters/chap-001/lyric-file",
+        files={"file": ("lyrics.lrc", lrc.encode("gbk"), "text/plain")},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["size"] == len(lrc.encode("gbk"))
+
+    # The GBK bytes were stored verbatim; what matters is that they decode back into the same
+    # timestamped lyrics, which is what the alignment path consumes.
+    stored = project_store.PROJECTS_DIR / project_id / "chapters" / "chap-001" / "lyrics.lrc"
+    decoded = lrc_service.decode_lrc_content(stored.read_bytes())
+    assert decoded == lrc
+    assert [line.text for line in lrc_service.parse_lrc(decoded)] == ["一闪一闪亮晶晶", "满天都是小星星"]
+    assert [line.start_sec for line in lrc_service.parse_lrc(decoded)] == [12.0, 18.0]
+
 
 
 def test_full_reanalysis_preserves_edited_mix_settings(monkeypatch):
