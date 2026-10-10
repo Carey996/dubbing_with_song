@@ -131,6 +131,52 @@ RENDER_KEEP_COUNT=5 python -m uvicorn backend.app.main:app --reload --port 28080
 - 后端导出会优先通过 AI TTS 生成旁白 WAV。
 - 如果系统安装了 `ffmpeg`，且项目上传了 MP3，后端会导出混音 MP3。
 - 支持 `GET /api/projects/{id}/chapters` 预览章节，以及 `POST /api/projects/{id}/chapters/{chapter_id}/analyze` 按章节分析。
+- 每个流程都额外提供一个 LangGraph 工作流 Agent，可在 `/workflows` 页面单独运行并实时查看每个节点的状态。
+
+## LangGraph 工作流 Agent
+
+`backend/app/workflows/` 把上面的 7 个流程各包装成一个 LangGraph `StateGraph`。节点只调用现有
+`backend/app/services/*`，不复制业务逻辑；`content-analysis` 和 `chapter-analysis` 是真正的
+agent 循环：LLM 返回的 JSON 解析失败会自动重试（最多 3 次），仍然失败才终止；`render` 会根据
+是否有 MP3 和 `ffmpeg` 走混音或仅旁白分支。
+
+| workflow id | 名称 | 说明 |
+| --- | --- | --- |
+| `project-intake` | 项目接入 | 校验文本 → 创建项目 → 预览章节 |
+| `chapter-split` | 章节切分 | 读取项目 → 按标题切分 → 输出概览 |
+| `content-analysis` | 全篇内容分析 | 分块调用 LLM，JSON 解析失败自动重试 |
+| `chapter-analysis` | 单章分析 | 只分析一章并并回时间轴，有 LRC 时自动写入卡点 |
+| `song-alignment` | 歌曲/歌词对齐 | 用 LRC 匹配歌词片段并写入歌曲卡点 |
+| `timeline-edit` | 时间轴保存 | 校验 + 归一化片段后写入 `timeline.json` |
+| `render` | 渲染导出 | 生成旁白音轨，能混音时输出 MP3，否则导出 WAV |
+
+### 页面
+
+打开 `/workflows`（或在顶部点「工作流」）。左侧选工作流，右侧填参数后运行：节点时间线会实时显示
+每个节点的状态、耗时和结果摘要，结束后展示结构化结果（项目/分析跳转、渲染产物播放与下载），
+下方是最近 50 次运行记录，可点开回放。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/workflows` | 7 个工作流的元数据与输入 schema（前端据此渲染表单） |
+| `POST` | `/api/workflows/{workflow_id}/runs` | 提交参数启动运行，返回 `{runId, status}`（202） |
+| `GET` | `/api/workflows/runs` | 最近的运行记录 |
+| `GET` | `/api/workflows/runs/{run_id}` | 运行快照（含已产生的事件，刷新页面后恢复用） |
+| `GET` | `/api/workflows/runs/{run_id}/events` | SSE 事件流，支持 `Last-Event-ID` 重放 |
+
+事件类型为 `run_started`、`node_started`、`node_finished`、`node_failed`、`warning`、
+`run_finished`、`run_failed`，每条事件带单调递增的 `seq`。文件上传仍然走原有的项目接口
+（先在「项目」页上传 MP3 / LRC / txt），workflow 只接受 JSON 参数。
+
+运行记录保存在 `data/workflow_runs/<run_id>.json`，保留最近 `WORKFLOW_RUN_KEEP_COUNT`（默认 50）个；
+并发运行上限由 `WORKFLOW_RUN_CONCURRENCY`（默认 4）控制，超出上限的 run 保持 `queued`。
+后端重启时未完成的 run 会被标记为 `interrupted`。
+
+```bash
+WORKFLOW_RUN_CONCURRENCY=2 WORKFLOW_RUN_KEEP_COUNT=20 python -m uvicorn backend.app.main:app --reload --port 28080
+```
 
 ## 降级说明
 
