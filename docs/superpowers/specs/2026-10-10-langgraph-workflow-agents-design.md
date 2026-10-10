@@ -2,7 +2,7 @@
 
 日期：2026-10-10
 分支：`codex/langgraph-workflow-agents`
-状态：已确认，待实施
+状态：已实施（见文末「实施结果」）
 
 ## 1. 目标
 
@@ -197,3 +197,25 @@ data: {"seq":12,"runId":"...","workflowId":"content-analysis","node":"llm_analyz
 
 按 `AGENTS.md` 在 `.worktrees/langgraph-workflow-agents` 的 `codex/langgraph-workflow-agents` 分支实施；
 完成后运行验证，再询问是否合并回 `main`。
+
+## 9. 实施结果
+
+- 后端：`backend/app/workflows/`（state/common/registry/runner/analysis_nodes + 7 个 graph）与
+  `backend/app/routers/workflows.py`；`main.py` 只增加一行 router 挂载。
+- `analyzer.py` 做了一次保持行为的抽取，新增 `build_analyzer_llm()` / `analyzer_chunk_chars()`，
+  让分析工作流复用同一套 prompt 与模型配置，而不是复制一份。
+- 前端：`WorkflowPage.jsx`、`workflowCatalog.js`、`workflowRunStream.js`、`api.js`；
+  `workflowNavigation.js` 把 `workflows` 作为与 `history` 并列的独立路由，项目三步导航不变。
+- 依赖：`langgraph>=1.0`（实际安装 1.2.14，与 `langchain-core` 1.6 兼容）。
+
+验证证据（全部在 worktree 内执行）：
+
+| 验证 | 结果 |
+| --- | --- |
+| `python -m pytest -q` | 138 passed（既有 79 + 新增 59） |
+| `npm test` | 9 个测试文件全部通过（新增 `workflowCatalog` / `workflowRunStream` / 扩充 `workflowNavigation`） |
+| `npm run build` | 构建成功 |
+| 真实浏览器（Chrome + 本地后端/Vite） | `/workflows` 列出 7 个工作流；`project-intake`、`chapter-split`、`timeline-edit` 跑通并正确落库；`content-analysis` 在缺少 `OPENAI_API_KEY` 时显示 `node_failed`（节点 `llm_analyze`）而不是空白错误；运行记录可回放 |
+
+未覆盖：LLM/TTS 真实调用路径（本机无 key）——工作流对这类失败的行为已由 mock 测试与浏览器验证覆盖。
+
