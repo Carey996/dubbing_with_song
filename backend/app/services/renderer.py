@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from openai import OpenAI
 
+from . import minimax_tts
 from .project_store import Project, read_timeline
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -22,6 +23,7 @@ DEFAULT_TTS_INSTRUCTIONS = (
 )
 DEFAULT_OPENROUTER_TTS_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_TTS_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
+DEFAULT_MINIMAX_TTS_MODEL = minimax_tts.DEFAULT_MODEL
 BUNDLED_FFMPEG_PATH = BASE_DIR / "tools" / "ffmpeg" / "windows-x64" / "ffmpeg.exe"
 
 
@@ -199,8 +201,71 @@ def synthesize_wav(text: str, output_path: Path, segment: dict | None = None) ->
     if provider == "openai":
         synthesize_wav_with_openai(text, output_path, segment=segment)
         return
+    if provider == "minimax":
+        synthesize_wav_with_minimax(text, output_path, segment=segment)
+        return
 
-    raise HTTPException(status_code=503, detail=f"Unsupported TTS_PROVIDER: {provider}. Use openrouter or openai.")
+    raise HTTPException(
+        status_code=503,
+        detail=f"Unsupported TTS_PROVIDER: {provider}. Use openrouter, openai or minimax.",
+    )
+
+
+def synthesize_wav_with_minimax(text: str, output_path: Path, segment: dict | None = None) -> None:
+    """MiniMax ``/v1/t2a_v2``.
+
+    With ``TTS_RESPONSE_FORMAT=wav`` MiniMax returns 22.05 kHz mono 16-bit PCM, which is exactly
+    what the narration concatenation expects, so no ffmpeg is involved. ``mp3`` falls back to the
+    same ffmpeg conversion the OpenRouter path uses.
+    """
+
+    api_key = require_tts_api_key()
+    model = get_tts_model(DEFAULT_MINIMAX_TTS_MODEL)
+    voice = get_tts_voice(segment)
+    audio_format = minimax_tts.audio_format()
+    payload = minimax_tts.build_payload(
+        text=text,
+        model=model,
+        voice=voice,
+        segment=segment,
+        audio_format_value=audio_format,
+    )
+
+    try:
+        audio = minimax_tts.request_audio(api_key=api_key, payload=payload, model=model, voice=voice)
+    except minimax_tts.MinimaxRequestError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=minimax_tts.failure_detail(
+                exc.message,
+                base_url_value=minimax_tts.base_url(),
+                model=model,
+                voice=voice,
+                audio_format_value=audio_format,
+                attempts=minimax_tts.max_attempts(),
+            ),
+        ) from exc
+
+    if audio_format == "wav":
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(audio)
+    else:
+        mp3_path = output_path.with_suffix(".mp3")
+        mp3_path.parent.mkdir(parents=True, exist_ok=True)
+        mp3_path.write_bytes(audio)
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Missing ffmpeg. MiniMax TTS returned MP3, so ffmpeg is required to convert it "
+                    "to WAV. Set TTS_RESPONSE_FORMAT=wav to skip the conversion."
+                ),
+            )
+        convert_audio_to_wav(ffmpeg, mp3_path, output_path)
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise HTTPException(status_code=502, detail="MiniMax TTS returned an empty audio file.")
 
 
 def synthesize_wav_with_openai(text: str, output_path: Path, segment: dict | None = None) -> None:
