@@ -7,6 +7,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[2]
 ENV_PATH = BASE_DIR / ".env"
 DATA_DIR_ENV = "DUBBING_DATA_DIR"
+SKIP_ENV_FILE_ENV = "DUBBING_SKIP_ENV_FILE"
 
 
 class ConfigError(RuntimeError):
@@ -27,6 +28,14 @@ def resolve_data_dir() -> Path:
 
 
 def load_env(path: Path = ENV_PATH) -> None:
+    """Copy ``.env`` into ``os.environ`` for keys that are not already set.
+
+    The test suite sets DUBBING_SKIP_ENV_FILE, because it asserts against the documented
+    defaults: a developer whose local ``.env`` selects a different TTS provider or response
+    format would otherwise change the behaviour under test.
+    """
+    if os.getenv(SKIP_ENV_FILE_ENV):
+        return
     if not path.exists():
         return
 
