@@ -44,6 +44,32 @@ class LlmAnalysis(BaseModel):
 
 
 def analyze_text(text: str, chapters: list[TextChapter] | None = None) -> dict:
+    prompt, llm = build_analyzer_llm()
+
+    cleaned = normalize_text(text)
+    if not cleaned:
+        return build_analysis([], [], engine="langchain", chapters=[])
+
+    target_chapters = chapters or split_text_into_chapters(cleaned)
+    chunk_inputs = build_chunk_inputs(target_chapters, analyzer_chunk_chars())
+    try:
+        analyzed_chunks = [
+            (chapter, parse_llm_analysis((prompt | llm).invoke({"text": chunk}).content))
+            for chapter, chunk in chunk_inputs
+        ]
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LangChain analyzer failed: {exc}") from exc
+
+    return merge_llm_analyses(analyzed_chunks, target_chapters, cleaned)
+
+
+def build_analyzer_llm():
+    """Build the prompt/model pair the analyzer uses.
+
+    Public so the LangGraph workflow agents reuse the exact same analyzer configuration
+    (model, base URL, prompt, JSON format instructions) instead of duplicating it, and so the
+    analysis workflow can retry a chunk whose JSON did not parse.
+    """
     try:
         api_key = require_env("OPENAI_API_KEY")
     except ConfigError as exc:
@@ -58,34 +84,21 @@ def analyze_text(text: str, chapters: list[TextChapter] | None = None) -> dict:
             detail="LangChain analyzer requires langchain-openai. Install project dependencies first.",
         ) from exc
 
-    cleaned = normalize_text(text)
-    if not cleaned:
-        return build_analysis([], [], engine="langchain", chapters=[])
-
-    model = os.getenv("OPENAI_MODEL", "gpt-5-nano")
-    base_url = os.getenv("OPENAI_BASE_URL") or None
     llm_kwargs = {
-        "model": model,
+        "model": os.getenv("OPENAI_MODEL", "gpt-5-nano"),
         "api_key": api_key,
         "temperature": 0,
         "max_retries": 2,
     }
+    base_url = os.getenv("OPENAI_BASE_URL") or None
     if base_url:
         llm_kwargs["base_url"] = base_url
 
-    prompt = build_prompt(ChatPromptTemplate, get_format_instructions())
-    llm = ChatOpenAI(**llm_kwargs)
-    target_chapters = chapters or split_text_into_chapters(cleaned)
-    chunk_inputs = build_chunk_inputs(target_chapters, int(os.getenv("ANALYZER_CHUNK_CHARS", DEFAULT_CHUNK_CHARS)))
-    try:
-        analyzed_chunks = [
-            (chapter, parse_llm_analysis((prompt | llm).invoke({"text": chunk}).content))
-            for chapter, chunk in chunk_inputs
-        ]
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"LangChain analyzer failed: {exc}") from exc
+    return build_prompt(ChatPromptTemplate, get_format_instructions()), ChatOpenAI(**llm_kwargs)
 
-    return merge_llm_analyses(analyzed_chunks, target_chapters, cleaned)
+
+def analyzer_chunk_chars() -> int:
+    return int(os.getenv("ANALYZER_CHUNK_CHARS", DEFAULT_CHUNK_CHARS))
 
 
 def build_prompt(chat_prompt_template, format_instructions: str):

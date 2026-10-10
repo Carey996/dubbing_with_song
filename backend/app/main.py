@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import load_env, resolve_data_dir
 from .repositories.db import initialize_database
-from .routers import projects
+from .routers import projects, workflows
 from .services.project_store import import_existing_projects
 
 
@@ -54,6 +54,7 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
 
 
 app.include_router(projects.router, prefix="/api")
+app.include_router(workflows.router, prefix="/api")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
 
