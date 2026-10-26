@@ -1,7 +1,8 @@
 """LLM analysis nodes shared by the 全篇 and 单章 analysis workflows.
 
-Both workflows chunk text, ask the configured LangChain analyzer for JSON, and retry a chunk
-whose answer does not parse. Keeping the nodes here means the repair loop only exists once.
+Both workflows chunk text, ask the configured LangChain analyzer for a structured
+``LlmAnalysis`` (``with_structured_output``), and retry a chunk whose answer did not satisfy
+the schema. Keeping the nodes here means the repair loop only exists once.
 """
 
 from __future__ import annotations
@@ -9,10 +10,10 @@ from __future__ import annotations
 from ..services.analyzer import (
     LlmAnalysis,
     analyzer_chunk_chars,
-    build_analyzer_llm,
     build_chunk_inputs,
+    build_structured_analyzer_llm,
+    coerce_llm_analysis,
     merge_llm_analyses,
-    parse_llm_analysis,
 )
 from .common import WorkflowError, merge_data
 
@@ -47,37 +48,59 @@ def node_build_chunks(state) -> dict:
 
 
 def node_llm_analyze(state) -> dict:
+    """Analyze every chunk with the structured-output chain.
+
+    A chunk whose structured call fails is recorded as ``None`` plus a parse error instead of
+    failing the whole run, because the graph retries exactly those chunks in ``repair_json``.
+    """
+
     chunk_inputs = state["data"]["chunkInputs"]
-    prompt, llm = build_analyzer_llm()
-    raw_contents = [_invoke(prompt, llm, chunk) for _chapter, chunk in chunk_inputs]
-    return {
-        **merge_data(state, rawContents=raw_contents, attempts=1),
-        "__detail__": f"LLM 已返回 {len(raw_contents)} 个文本块的原始结果",
-    }
-
-
-def _invoke(prompt, llm, chunk: str) -> str:
-    response = (prompt | llm).invoke({"text": chunk})
-    content = getattr(response, "content", response)
-    if isinstance(content, list):
-        # Some chat models answer with content blocks instead of a plain string.
-        return "".join(part if isinstance(part, str) else str(part.get("text", "")) for part in content)
-    return str(content)
-
-
-def node_validate_json(state) -> dict:
-    raw_contents = state["data"]["rawContents"]
+    prompt, structured_llm = build_structured_analyzer_llm()
     parsed: list[LlmAnalysis | None] = []
     error_details: list[dict] = []
-    for index, content in enumerate(raw_contents):
+    for index, (_chapter, chunk) in enumerate(chunk_inputs):
         try:
-            parsed.append(parse_llm_analysis(content))
-        except Exception as exc:  # noqa: BLE001 - any parse failure is a retry candidate
+            parsed.append(_invoke_structured(prompt, structured_llm, chunk))
+        except Exception as exc:  # noqa: BLE001 - a bad chunk is retried, not fatal
             parsed.append(None)
             error_details.append({"index": index, "message": str(exc)})
 
-    attempts = int(state["data"].get("attempts") or 1)
-    detail = f"第 {attempts} 次解析：{len(parsed) - len(error_details)}/{len(parsed)} 个文本块成功"
+    succeeded = len(parsed) - len(error_details)
+    return {
+        **merge_data(
+            state,
+            parsed=parsed,
+            parseErrors=[item["index"] for item in error_details],
+            parseErrorDetails=error_details,
+            attempts=1,
+        ),
+        "__detail__": f"LLM 已返回 {len(parsed)} 个文本块，{succeeded} 个符合结构化格式",
+    }
+
+
+def _invoke_structured(prompt, structured_llm, chunk: str) -> LlmAnalysis:
+    response = (prompt | structured_llm).invoke({"text": chunk})
+    return coerce_llm_analysis(response)
+
+
+def node_validate_json(state) -> dict:
+    """Re-check the structured results; no JSON parsing happens here anymore."""
+
+    data = state["data"]
+    parsed = list(data.get("parsed") or [])
+    messages = {
+        item["index"]: item.get("message")
+        for item in (data.get("parseErrorDetails") or [])
+        if isinstance(item, dict) and "index" in item
+    }
+    error_details = [
+        {"index": index, "message": messages.get(index) or "LLM 未返回有效的结构化分析结果"}
+        for index, analysis in enumerate(parsed)
+        if not isinstance(analysis, LlmAnalysis)
+    ]
+
+    attempts = int(data.get("attempts") or 1)
+    detail = f"第 {attempts} 次校验：{len(parsed) - len(error_details)}/{len(parsed)} 个文本块符合结构化格式"
     if error_details:
         detail += f"，{len(error_details)} 个需要重试"
     return {
@@ -103,24 +126,40 @@ def node_repair_json(state) -> dict:
     data = state["data"]
     failing_indexes = list(data.get("parseErrors") or [])
     chunk_inputs = data["chunkInputs"]
-    raw_contents = list(data["rawContents"])
-    prompt, llm = build_analyzer_llm()
+    parsed = list(data["parsed"])
+    details = {
+        item["index"]: item
+        for item in (data.get("parseErrorDetails") or [])
+        if isinstance(item, dict) and "index" in item
+    }
+    prompt, structured_llm = build_structured_analyzer_llm()
     for index in failing_indexes:
         _chapter, chunk = chunk_inputs[index]
-        raw_contents[index] = _invoke(prompt, llm, chunk + REPAIR_INSTRUCTION)
+        try:
+            parsed[index] = _invoke_structured(prompt, structured_llm, chunk + REPAIR_INSTRUCTION)
+            details.pop(index, None)
+        except Exception as exc:  # noqa: BLE001 - keep retrying until MAX_LLM_ATTEMPTS
+            parsed[index] = None
+            details[index] = {"index": index, "message": str(exc)}
 
     attempts = int(data.get("attempts") or 1) + 1
     return {
-        **merge_data(state, rawContents=raw_contents, attempts=attempts),
-        "__detail__": f"第 {attempts} 次尝试：重试 {len(failing_indexes)} 个 JSON 解析失败的文本块",
+        **merge_data(
+            state,
+            parsed=parsed,
+            parseErrors=[index for index in failing_indexes if index in details],
+            parseErrorDetails=[details[index] for index in sorted(details)],
+            attempts=attempts,
+        ),
+        "__detail__": f"第 {attempts} 次尝试：重试 {len(failing_indexes)} 个结构化输出失败的文本块",
     }
 
 
 def node_give_up(state) -> dict:
     details = state["data"].get("parseErrorDetails") or []
-    first = details[0]["message"] if details else "未知解析错误"
+    first = details[0]["message"] if details else "未知结构化输出错误"
     raise WorkflowError(
-        f"LLM 连续 {MAX_LLM_ATTEMPTS} 次返回了无法解析的 JSON，最后一条错误：{first}",
+        f"LLM 连续 {MAX_LLM_ATTEMPTS} 次没有返回合法的结构化分析结果，最后一条错误：{first}",
         code="llm_json_invalid",
     )
 

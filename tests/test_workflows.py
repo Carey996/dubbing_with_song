@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from langgraph.graph import END, START, StateGraph
 
 from backend.app.main import app
-from backend.app.services import project_store
+from backend.app.services import analyzer, project_store
 from backend.app.workflows import analysis_nodes, registry, render, runner
 from backend.app.workflows.common import WorkflowError, step_node
 from backend.app.workflows.runner import merge_state_update, run_registry
@@ -111,32 +111,46 @@ def lyric_segment(text: str = "一闪一闪亮晶晶", duration: float = 5.0) ->
     }
 
 
-class FakeResponse:
-    def __init__(self, content: str) -> None:
-        self.content = content
+class FakeStructuredResult:
+    """Stand-in for the runnable ``with_structured_output`` returns.
 
+    It decodes the responder's JSON and validates it into ``LlmAnalysis``, so an invalid answer
+    raises ``ValueError`` exactly like the real structured-output parser would.
+    """
 
-class FakeChain:
     def __init__(self, responder) -> None:
         self.responder = responder
 
-    def invoke(self, payload: dict) -> FakeResponse:
-        return FakeResponse(self.responder(payload["text"]))
+    def invoke(self, payload: dict) -> analyzer.LlmAnalysis:
+        return analyzer.LlmAnalysis.model_validate(json.loads(self.responder(payload["text"])))
+
+
+class FakeStructuredLLM:
+    """A fake chat model that only implements the structured-output surface the analyzer uses."""
+
+    def __init__(self, responder) -> None:
+        self.responder = responder
+        self.structured_calls: list[dict] = []
+
+    def with_structured_output(self, schema, **kwargs):
+        self.structured_calls.append({"schema": schema, **kwargs})
+        return FakeStructuredResult(self.responder)
 
 
 class FakePrompt:
     def __init__(self, responder) -> None:
         self.responder = responder
 
-    def __or__(self, _other) -> FakeChain:
-        return FakeChain(self.responder)
+    def __or__(self, other):
+        # ``prompt | structured_runnable``: the runnable does the parsing, so keep it as-is.
+        return other
 
 
 def install_fake_analyzer(monkeypatch, responder) -> None:
     monkeypatch.setattr(
-        analysis_nodes,
+        analyzer,
         "build_analyzer_llm",
-        lambda: (FakePrompt(responder), object()),
+        lambda: (FakePrompt(responder), FakeStructuredLLM(responder)),
     )
 
 
@@ -385,6 +399,28 @@ def test_content_analysis_repairs_a_chunk_whose_json_does_not_parse(monkeypatch)
     assert names.count("repair_json") == 1
     assert names.count("validate_json") == 2
     assert "上一次的输出无法解析为合法 JSON" in calls[1]
+
+
+def test_content_analysis_repairs_only_the_chunk_that_failed(monkeypatch):
+    project_id = create_project("第一章 登台\n" + "旁白内容。" * 20 + "\n\n" + "另一段旁白。" * 20)
+    calls: list[str] = []
+
+    def responder(text: str) -> str:
+        calls.append(text)
+        if "另一段旁白" in text and "上一次的输出无法解析" not in text:
+            return "这不是 JSON，只是随便一段话。"
+        return analysis_json("另一段旁白。" if "另一段旁白" in text else "旁白内容。")
+
+    install_fake_analyzer(monkeypatch, responder)
+
+    snapshot = run_workflow("content-analysis", {"projectId": project_id, "chunkChars": 200})
+
+    assert snapshot["status"] == "succeeded", snapshot.get("error")
+    assert node_names(snapshot).count("repair_json") == 1
+    assert len(calls) == 3
+    # The successfully parsed chunk must not be sent to the model a second time.
+    assert len([call for call in calls if "旁白内容。" in call]) == 1
+    assert "上一次的输出无法解析" in calls[2]
 
 
 def test_content_analysis_gives_up_after_max_attempts(monkeypatch):
