@@ -13,6 +13,9 @@ from ..config import ConfigError, require_env
 from .chapter_service import TextChapter, split_text_into_chapters
 
 DEFAULT_CHUNK_CHARS = 1200
+DEFAULT_STRUCTURED_OUTPUT_METHOD = "function_calling"
+STRUCTURED_OUTPUT_METHODS = ("function_calling", "json_mode", "json_schema")
+STRUCTURED_OUTPUT_DISABLED_VALUES = {"0", "false", "off"}
 
 
 class LlmSegment(BaseModel):
@@ -44,7 +47,17 @@ class LlmAnalysis(BaseModel):
 
 
 def analyze_text(text: str, chapters: list[TextChapter] | None = None) -> dict:
-    prompt, llm = build_analyzer_llm()
+    """Analyze text into segments and song candidates.
+
+    Structured output is the default: LangChain parses each model answer into ``LlmAnalysis``,
+    so this path never touches the hand-written JSON repair logic. Setting
+    ``ANALYZER_STRUCTURED_OUTPUT`` to ``0``/``false``/``off`` restores the legacy
+    "raw content + ``parse_llm_analysis``" path for models or proxies that cannot do
+    structured output.
+    """
+
+    structured = analyzer_structured_output_enabled()
+    prompt, llm = build_structured_analyzer_llm() if structured else build_analyzer_llm()
 
     cleaned = normalize_text(text)
     if not cleaned:
@@ -54,7 +67,7 @@ def analyze_text(text: str, chapters: list[TextChapter] | None = None) -> dict:
     chunk_inputs = build_chunk_inputs(target_chapters, analyzer_chunk_chars())
     try:
         analyzed_chunks = [
-            (chapter, parse_llm_analysis((prompt | llm).invoke({"text": chunk}).content))
+            (chapter, invoke_analyzer(prompt, llm, chunk, structured=structured))
             for chapter, chunk in chunk_inputs
         ]
     except Exception as exc:
@@ -63,12 +76,64 @@ def analyze_text(text: str, chapters: list[TextChapter] | None = None) -> dict:
     return merge_llm_analyses(analyzed_chunks, target_chapters, cleaned)
 
 
+def analyzer_structured_output_enabled() -> bool:
+    raw = (os.getenv("ANALYZER_STRUCTURED_OUTPUT") or "").strip().lower()
+    return raw not in STRUCTURED_OUTPUT_DISABLED_VALUES
+
+
+def analyzer_structured_output_method() -> str:
+    raw = (os.getenv("ANALYZER_STRUCTURED_METHOD") or "").strip().lower()
+    return raw if raw in STRUCTURED_OUTPUT_METHODS else DEFAULT_STRUCTURED_OUTPUT_METHOD
+
+
+def build_structured_analyzer_llm():
+    """Build the prompt plus a structured-output runnable that returns ``LlmAnalysis``.
+
+    ``method`` is configurable because OpenAI-compatible servers differ: local servers and
+    most proxies support ``function_calling``, OpenAI's own models support ``json_schema``,
+    and ``json_mode`` only promises a JSON object (weaker schema enforcement, but widely
+    supported). An unknown value falls back to the documented default instead of failing the
+    run, and older langchain-openai releases that lack the ``method`` parameter still work.
+    """
+
+    prompt, llm = build_analyzer_llm()
+    method = analyzer_structured_output_method()
+    try:
+        structured_llm = llm.with_structured_output(LlmAnalysis, method=method)
+    except TypeError:
+        structured_llm = llm.with_structured_output(LlmAnalysis)
+    return prompt, structured_llm
+
+
+def invoke_analyzer(prompt, llm, chunk: str, *, structured: bool):
+    """Run one analyzer chunk, returning ``LlmAnalysis`` or raw content for the legacy path."""
+
+    response = (prompt | llm).invoke({"text": chunk})
+    if structured:
+        return coerce_llm_analysis(response)
+    return parse_llm_analysis(response.content)
+
+
+def coerce_llm_analysis(result) -> LlmAnalysis:
+    """Normalize a structured-output result into ``LlmAnalysis``."""
+
+    if isinstance(result, LlmAnalysis):
+        return result
+    if isinstance(result, dict):
+        try:
+            return LlmAnalysis.model_validate(result)
+        except ValidationError as exc:
+            raise ValueError(f"结构化输出不符合 LlmAnalysis：{exc}") from exc
+    raise ValueError(f"结构化分析返回了意外的结果类型：{type(result).__name__}")
+
+
 def build_analyzer_llm():
     """Build the prompt/model pair the analyzer uses.
 
-    Public so the LangGraph workflow agents reuse the exact same analyzer configuration
-    (model, base URL, prompt, JSON format instructions) instead of duplicating it, and so the
-    analysis workflow can retry a chunk whose JSON did not parse.
+    This is the text-only pair: ``analyze_text`` uses it for the legacy
+    ``ANALYZER_STRUCTURED_OUTPUT=0`` path, and ``build_structured_analyzer_llm`` wraps the
+    same configured model with ``with_structured_output``. Keeping the configuration here
+    means the LangGraph workflows and the REST analyzer share one model/prompt setup.
     """
     try:
         api_key = require_env("OPENAI_API_KEY")

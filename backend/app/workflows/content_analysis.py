@@ -1,7 +1,8 @@
 """全篇内容分析 workflow。
 
-This is the agentic one: it asks the configured LangChain analyzer for JSON, validates it, and
-routes back into a repair node when a chunk does not parse, up to ``MAX_LLM_ATTEMPTS``.
+This is the agentic one: it asks the configured LangChain analyzer for structured
+``LlmAnalysis`` results, validates them, and routes back into a repair node when a chunk does
+not satisfy the schema, up to ``MAX_LLM_ATTEMPTS``.
 """
 
 from __future__ import annotations
@@ -46,8 +47,8 @@ def build_graph():
     graph.add_node("split_chapters", step_node(WORKFLOW_ID, "split_chapters", "切分章节", split_chapters_delta))
     graph.add_node("build_chunks", step_node(WORKFLOW_ID, "build_chunks", "构建 LLM 输入块", analysis_nodes.node_build_chunks))
     graph.add_node("llm_analyze", step_node(WORKFLOW_ID, "llm_analyze", "LLM 分析", analysis_nodes.node_llm_analyze))
-    graph.add_node("validate_json", step_node(WORKFLOW_ID, "validate_json", "校验 LLM JSON", analysis_nodes.node_validate_json))
-    graph.add_node("repair_json", step_node(WORKFLOW_ID, "repair_json", "修复 LLM JSON", analysis_nodes.node_repair_json))
+    graph.add_node("validate_json", step_node(WORKFLOW_ID, "validate_json", "校验结构化结果", analysis_nodes.node_validate_json))
+    graph.add_node("repair_json", step_node(WORKFLOW_ID, "repair_json", "修复结构化结果", analysis_nodes.node_repair_json))
     graph.add_node("give_up", step_node(WORKFLOW_ID, "give_up", "放弃分析", analysis_nodes.node_give_up))
     graph.add_node("merge_analysis", step_node(WORKFLOW_ID, "merge_analysis", "合并片段", analysis_nodes.node_merge_analysis))
     graph.add_node("persist_analysis", step_node(WORKFLOW_ID, "persist_analysis", "保存分析结果", node_persist_analysis))
