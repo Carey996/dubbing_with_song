@@ -367,6 +367,9 @@ def test_mix_with_song_keeps_song_start_offset_when_bgm_loops(monkeypatch, tmp_p
 
     monkeypatch.setattr(renderer, "get_wav_duration", lambda _path: 30.0)
     monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+    # Without a discoverable ffprobe the renderer skips the duration probe and falls back to
+    # input-level -stream_loop, so the test must not depend on the host having ffprobe.
+    monkeypatch.setattr(renderer.shutil, "which", lambda name: "ffprobe" if name == "ffprobe" else None)
 
     renderer.mix_with_song(
         "ffmpeg",
@@ -403,6 +406,8 @@ def test_mix_with_song_skips_bgm_loop_when_song_covers_the_narration(monkeypatch
 
     monkeypatch.setattr(renderer, "get_wav_duration", lambda _path: 30.0)
     monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+    # See the previous test: fake a discoverable ffprobe so the duration probe runs here too.
+    monkeypatch.setattr(renderer.shutil, "which", lambda name: "ffprobe" if name == "ffprobe" else None)
 
     renderer.mix_with_song(
         "ffmpeg",

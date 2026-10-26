@@ -54,7 +54,9 @@ def fake_analysis(text: str, chapters=None) -> dict:
 def write_test_txt(filename: str, text: str, encoding: str = "utf-8") -> Path:
     TEST_INPUT_DIR.mkdir(parents=True, exist_ok=True)
     source = TEST_INPUT_DIR / filename
-    source.write_text(text, encoding=encoding)
+    # newline="" writes the text verbatim: without it Windows turns the fixture's \n into \r\n,
+    # which the GBK round-trip test would then compare against LF and fail on Windows only.
+    source.write_text(text, encoding=encoding, newline="")
     return source
 
 
